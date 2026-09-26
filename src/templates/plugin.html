@@ -30,6 +30,7 @@
         const loadPluginSettings = pluginInstanceName != '';
         const styleSettings = {{ style_settings | default(false) | tojson }};
         const refreshSettings = {{ refresh_settings | tojson if refresh_settings else {} }};
+        const displayDuration = {{ display_duration | tojson if display_duration else 'null' }};
 
         let uploadedFiles = {};
 
@@ -135,7 +136,7 @@
         function openModal(modal_id) {
             // Handle refresh settings modal specially with the manager
             if (modal_id === 'refreshSettingsModal' && editRefreshManager) {
-                editRefreshManager.open({ refreshSettings });
+                editRefreshManager.open({ refreshSettings, displayDuration });
                 return;
             }
 

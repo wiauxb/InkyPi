@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify, current_app, render_template
-from utils.time_utils import calculate_seconds
+from utils.time_utils import calculate_seconds, parse_display_duration
 import json
 from datetime import datetime, timedelta
 import os
@@ -51,12 +51,17 @@ def add_plugin():
                 return jsonify({"error": "Refresh time is required"}), 400
             refresh_config = {"scheduled": refresh_time}
 
+        display_duration, duration_error = parse_display_duration(refresh_settings)
+        if duration_error:
+            return jsonify({"error": duration_error}), 400
+
         plugin_settings.update(handle_request_files(request.files))
         plugin_dict = {
             "plugin_id": plugin_id,
             "refresh": refresh_config,
             "plugin_settings": plugin_settings,
-            "name": instance_name
+            "name": instance_name,
+            "display_duration": display_duration
         }
         result = playlist_manager.add_plugin_to_playlist(playlist, plugin_dict)
         if not result:
@@ -78,7 +83,8 @@ def playlists():
         'playlist.html',
         playlist_config=playlist_manager.to_dict(),
         refresh_info=refresh_info.to_dict(),
-        plugins={p["id"]: p for p in plugins_list}
+        plugins={p["id"]: p for p in plugins_list},
+        plugin_cycle_interval_seconds=device_config.get_config("plugin_cycle_interval_seconds", default=3600)
     )
 
 @playlist_bp.route('/create_playlist', methods=['POST'])
@@ -160,6 +166,18 @@ def delete_playlist(playlist_name):
     device_config.write_config()
 
     return jsonify({"success": True, "message": f"Deleted playlist '{playlist_name}'!"})
+
+@playlist_bp.app_template_filter('format_duration')
+def format_duration(seconds):
+    """Formats a number of seconds as a short human string, e.g. '5 min', '1 h', '1 h 30 min'."""
+    seconds = int(seconds or 0)
+    hours, remainder = divmod(seconds, 3600)
+    minutes = remainder // 60
+    if hours and minutes:
+        return f"{hours} h {minutes} min"
+    if hours:
+        return f"{hours} h"
+    return f"{minutes} min"
 
 @playlist_bp.app_template_filter('format_relative_time')
 def format_relative_time(iso_date_string):

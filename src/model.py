@@ -17,7 +17,8 @@ class RefreshInfo:
         plugin_instance (str): Plugin instance name if refresh_type is 'Playlist'.
     """
 
-    def __init__(self, refresh_type, plugin_id, refresh_time, image_hash, playlist=None, plugin_instance=None):
+    def __init__(self, refresh_type, plugin_id, refresh_time, image_hash, playlist=None, plugin_instance=None,
+                 slot_start_time=None):
         """Initialize RefreshInfo instance."""
         self.refresh_time = refresh_time
         self.image_hash = image_hash
@@ -25,6 +26,9 @@ class RefreshInfo:
         self.plugin_id = plugin_id
         self.playlist = playlist
         self.plugin_instance = plugin_instance
+        # When the currently displayed playlist item took the screen. Unlike refresh_time it is not
+        # advanced by in-place regenerations of the same item, so it anchors the item's display duration.
+        self.slot_start_time = slot_start_time
 
     def get_refresh_datetime(self):
         """Returns the refresh time as a datetime object or None if not set."""
@@ -32,6 +36,12 @@ class RefreshInfo:
         if self.refresh_time:
             latest_refresh = datetime.fromisoformat(self.refresh_time)
         return latest_refresh
+
+    def get_slot_start_datetime(self):
+        """Returns when the current item took the screen, falling back to the refresh time for older configs."""
+        if self.slot_start_time:
+            return datetime.fromisoformat(self.slot_start_time)
+        return self.get_refresh_datetime()
 
     def to_dict(self):
         refresh_dict = {
@@ -44,6 +54,8 @@ class RefreshInfo:
             refresh_dict["playlist"] = self.playlist
         if self.plugin_instance:
             refresh_dict["plugin_instance"] = self.plugin_instance
+        if self.slot_start_time:
+            refresh_dict["slot_start_time"] = self.slot_start_time
         return refresh_dict
 
     @classmethod
@@ -54,7 +66,8 @@ class RefreshInfo:
             refresh_type=data.get("refresh_type"),
             plugin_id=data.get("plugin_id"),
             playlist=data.get("playlist"),
-            plugin_instance=data.get("plugin_instance")
+            plugin_instance=data.get("plugin_instance"),
+            slot_start_time=data.get("slot_start_time")
         )
 
 class PlaylistManager:
@@ -279,14 +292,21 @@ class PluginInstance:
         settings (dict): Settings associated with the plugin.
         refresh (dict): Refresh settings, such as interval and scheduled time.
         latest_refresh (str): ISO-formatted string representing the last refresh time.
+        display_duration (int): Seconds this instance stays on screen before the playlist advances,
+            or None to use the device-wide plugin cycle interval.
     """
 
-    def __init__(self, plugin_id, name, settings, refresh, latest_refresh_time=None):
+    def __init__(self, plugin_id, name, settings, refresh, latest_refresh_time=None, display_duration=None):
         self.plugin_id = plugin_id
         self.name = name
         self.settings = settings
         self.refresh = refresh
         self.latest_refresh_time = latest_refresh_time
+        self.display_duration = display_duration
+
+    def get_display_duration(self, fallback_seconds):
+        """Returns how long this instance stays on screen, using the fallback when no override is set."""
+        return self.display_duration if self.display_duration else fallback_seconds
 
     def update(self, updated_data):
         """Update attributes of the class with the dictionary values."""
@@ -346,6 +366,7 @@ class PluginInstance:
             "plugin_settings": self.settings,
             "refresh": self.refresh,
             "latest_refresh_time": self.latest_refresh_time,
+            "display_duration": self.display_duration,
         }
 
     @classmethod
@@ -356,4 +377,5 @@ class PluginInstance:
             settings=data["plugin_settings"],
             refresh=data["refresh"],
             latest_refresh_time=data.get("latest_refresh_time"),
+            display_duration=data.get("display_duration"),
         )

@@ -54,6 +54,7 @@ def plugin_page(plugin_id):
                 template_params["plugin_settings"] = plugin_instance.settings
                 template_params["plugin_instance"] = plugin_instance_name
                 template_params["refresh_settings"] = plugin_instance.refresh
+                template_params["display_duration"] = plugin_instance.display_duration
 
             template_params["playlists"] = playlist_manager.get_playlist_names()
         except Exception as e:
@@ -188,6 +189,14 @@ def update_plugin_instance(instance_name):
                 if refresh_time:
                     plugin_instance.refresh = {"scheduled": refresh_time}
 
+            # Only touch the display duration when the form sent it, so older clients cannot clear it
+            if "displayMode" in refresh_settings:
+                from utils.time_utils import parse_display_duration
+                display_duration, duration_error = parse_display_duration(refresh_settings)
+                if duration_error:
+                    return jsonify({"error": duration_error}), 400
+                plugin_instance.display_duration = display_duration
+
         # Only update plugin settings if there's actual data (not just refresh settings)
         plugin_settings = form_data
         plugin_settings.update(handle_request_files(request.files, request.form))
@@ -196,6 +205,8 @@ def update_plugin_instance(instance_name):
             plugin_instance.settings = plugin_settings
 
         device_config.write_config()
+        # A changed display duration on the item currently on screen must take effect now
+        current_app.config['REFRESH_TASK'].signal_config_change()
     except Exception as e:
         return jsonify({"error": f"An error occurred: {str(e)}"}), 500
     return jsonify({"success": True, "message": f"Updated plugin instance {instance_name}."})

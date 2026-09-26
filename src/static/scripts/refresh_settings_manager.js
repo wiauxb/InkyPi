@@ -21,6 +21,11 @@ class RefreshSettingsManager {
         this.selectUnit = null;
         this.groupInterval = null;
         this.groupScheduled = null;
+        // Display duration (optional per-instance override of the global cycle interval)
+        this.radioDisplayDefault = null;
+        this.radioDisplayCustom = null;
+        this.inputDisplayDuration = null;
+        this.selectDisplayUnit = null;
 
         this.initialized = false;
     }
@@ -45,6 +50,10 @@ class RefreshSettingsManager {
         this.selectUnit = document.getElementById(`${this.prefix}-unit`);
         this.groupInterval = document.getElementById(`${this.prefix}-group-interval`);
         this.groupScheduled = document.getElementById(`${this.prefix}-group-scheduled`);
+        this.radioDisplayDefault = document.getElementById(`${this.prefix}-display-default`);
+        this.radioDisplayCustom = document.getElementById(`${this.prefix}-display-custom`);
+        this.inputDisplayDuration = document.getElementById(`${this.prefix}-display-duration`);
+        this.selectDisplayUnit = document.getElementById(`${this.prefix}-display-unit`);
 
         if (!this.radioInterval || !this.radioScheduled) {
             console.error(`RefreshSettingsManager: Form elements with prefix '${this.prefix}' not found`);
@@ -114,27 +123,44 @@ class RefreshSettingsManager {
     /**
      * Prepopulate form with existing refresh settings
      * @param {Object} refreshSettings - Refresh settings object {interval: number} or {scheduled: string}
+     * @param {number|null} displayDuration - Per-instance display duration in seconds, or null for the global default
      */
-    prepopulate(refreshSettings) {
-        if (!refreshSettings) return;
+    prepopulate(refreshSettings, displayDuration = null) {
+        if (refreshSettings) {
+            if (refreshSettings.interval) {
+                const { value, unit } = this.secondsToUnit(refreshSettings.interval);
+                this.radioInterval.checked = true;
+                this.inputInterval.value = value;
+                this.selectUnit.value = unit;
+            } else if (refreshSettings.scheduled) {
+                this.radioScheduled.checked = true;
+                this.inputScheduled.value = refreshSettings.scheduled;
+            }
+        }
 
-        if (refreshSettings.interval) {
-            const { value, unit } = this.secondsToUnit(refreshSettings.interval);
-            this.radioInterval.checked = true;
-            this.inputInterval.value = value;
-            this.selectUnit.value = unit;
-        } else if (refreshSettings.scheduled) {
-            this.radioScheduled.checked = true;
-            this.inputScheduled.value = refreshSettings.scheduled;
+        if (!this.radioDisplayCustom) return;
+        if (displayDuration) {
+            let { value, unit } = this.secondsToUnit(displayDuration);
+            if (unit === 'day') { value = value * 24; unit = 'hour'; }  // the duration select has no day option
+            this.radioDisplayCustom.checked = true;
+            this.inputDisplayDuration.value = value;
+            this.selectDisplayUnit.value = unit;
+        } else {
+            this.radioDisplayDefault.checked = true;
+            this.inputDisplayDuration.value = '';
         }
     }
 
     /**
      * Get current form values as an object
-     * @returns {{refreshType: string, interval?: string, unit?: string, refreshTime?: string}}
+     * @returns {{refreshType: string, interval?: string, unit?: string, refreshTime?: string,
+     *            displayMode?: string, displayDuration?: string, displayUnit?: string}}
      */
     getFormData() {
-        const refreshType = document.querySelector(`input[name="refreshType"]:checked`)?.value;
+        // Use the cached radios: the partial is included more than once on the plugin page,
+        // so a document-wide query would not be tied to this manager's prefix.
+        const refreshType = this.radioInterval.checked ? 'interval'
+            : this.radioScheduled.checked ? 'scheduled' : undefined;
         const data = { refreshType };
 
         if (refreshType === 'interval') {
@@ -142,6 +168,14 @@ class RefreshSettingsManager {
             data.unit = this.selectUnit.value;
         } else if (refreshType === 'scheduled') {
             data.refreshTime = this.inputScheduled.value;
+        }
+
+        if (this.radioDisplayCustom) {
+            data.displayMode = this.radioDisplayCustom.checked ? 'custom' : 'default';
+            if (data.displayMode === 'custom') {
+                data.displayDuration = this.inputDisplayDuration.value;
+                data.displayUnit = this.selectDisplayUnit.value;
+            }
         }
 
         return data;
@@ -170,6 +204,15 @@ class RefreshSettingsManager {
             }
         }
 
+        if (data.displayMode === 'custom') {
+            if (!data.displayDuration || data.displayDuration < 1) {
+                return { valid: false, error: 'Please enter a valid display duration' };
+            }
+            if (!data.displayUnit) {
+                return { valid: false, error: 'Please select a display duration unit' };
+            }
+        }
+
         return { valid: true };
     }
 
@@ -186,8 +229,8 @@ class RefreshSettingsManager {
         this.currentData = data;
 
         // Prepopulate if data provided
-        if (data && data.refreshSettings) {
-            this.prepopulate(data.refreshSettings);
+        if (data && (data.refreshSettings || data.displayDuration !== undefined)) {
+            this.prepopulate(data.refreshSettings, data.displayDuration ?? null);
         }
 
         this.modal.style.display = 'block';

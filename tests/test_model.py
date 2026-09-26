@@ -1,6 +1,48 @@
 import pytest
+from datetime import datetime, timezone
 
-from src.model import Playlist
+from src.model import Playlist, PluginInstance, RefreshInfo
+
+
+def _instance(**overrides):
+    data = {"plugin_id": "clock", "name": "Clock", "plugin_settings": {}, "refresh": {"interval": 60}}
+    data.update(overrides)
+    return PluginInstance.from_dict(data)
+
+
+class TestPluginInstance:
+
+    def test_round_trip_keeps_display_duration(self):
+        instance = _instance(display_duration=300)
+        assert instance.to_dict()["display_duration"] == 300
+        assert PluginInstance.from_dict(instance.to_dict()).display_duration == 300
+
+    def test_legacy_dict_without_display_duration_loads(self):
+        instance = _instance()
+        assert instance.display_duration is None
+        assert instance.to_dict()["display_duration"] is None
+
+    @pytest.mark.parametrize("value,expected", [(None, 3600), (0, 3600), (300, 300)])
+    def test_get_display_duration_falls_back_to_global(self, value, expected):
+        assert _instance(display_duration=value).get_display_duration(3600) == expected
+
+
+class TestRefreshInfo:
+
+    def test_slot_start_defaults_to_refresh_time(self):
+        info = RefreshInfo.from_dict({"refresh_type": "Playlist", "plugin_id": "clock",
+                                      "refresh_time": "2026-09-26T10:00:00+00:00", "image_hash": None})
+        assert info.slot_start_time is None
+        assert info.get_slot_start_datetime() == datetime(2026, 9, 26, 10, 0, tzinfo=timezone.utc)
+        assert "slot_start_time" not in info.to_dict()
+
+    def test_slot_start_round_trip(self):
+        info = RefreshInfo.from_dict({"refresh_type": "Playlist", "plugin_id": "clock",
+                                      "refresh_time": "2026-09-26T10:30:00+00:00", "image_hash": None,
+                                      "slot_start_time": "2026-09-26T10:00:00+00:00"})
+        assert info.get_slot_start_datetime() == datetime(2026, 9, 26, 10, 0, tzinfo=timezone.utc)
+        assert info.to_dict()["slot_start_time"] == "2026-09-26T10:00:00+00:00"
+
 
 class TestPlaylist:
 

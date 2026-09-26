@@ -333,7 +333,8 @@
                     const pluginId = this.dataset.pluginId;
                     const instanceName = this.dataset.instance;
                     const refreshSettings = JSON.parse(this.dataset.refresh);
-                    openRefreshModal(playlistName, pluginId, instanceName, refreshSettings);
+                    const displayDuration = Number(this.dataset.displayDuration) || null;
+                    openRefreshModal(playlistName, pluginId, instanceName, refreshSettings, displayDuration);
                 });
             });
         });
@@ -347,12 +348,12 @@
         const playlistRefreshManager = createRefreshSettingsManager('refreshSettingsModal', 'modal');
 
         // Function to open refresh settings modal from playlist view
-        function openRefreshModal(playlistName, pluginId, instanceName, refreshSettings) {
+        function openRefreshModal(playlistName, pluginId, instanceName, refreshSettings, displayDuration = null) {
             currentEditPlaylist = playlistName;
             currentEditPluginId = pluginId;
             currentEditInstance = instanceName;
 
-            playlistRefreshManager.open({ refreshSettings });
+            playlistRefreshManager.open({ refreshSettings, displayDuration });
         }
 
         function closeRefreshModal() {
@@ -440,6 +441,13 @@
                                         Refreshed {{ refresh_time }}
                                     </span>
                                 {% endif %}
+                                <span class="latest-refresh" title="How long this item stays on screen before the playlist moves on">
+                                    {% if plugin_instance.display_duration %}
+                                        Shown for {{ plugin_instance.display_duration | format_duration }}
+                                    {% else %}
+                                        Shown for {{ plugin_cycle_interval_seconds | format_duration }} (default)
+                                    {% endif %}
+                                </span>
 
                                 <a href="{{ url_for('plugin.plugin_page', plugin_id=plugin_instance.plugin_id) }}?instance={{ plugin_instance.name }}" class="edit-button">
                                     <img src="{{ url_for('static', filename='icons/edit.png') }}" alt="edit plugin" class="action-icon">
@@ -449,7 +457,8 @@
                                         data-playlist="{{ playlist.name }}"
                                         data-plugin-id="{{ plugin_instance.plugin_id }}"
                                         data-instance="{{ plugin_instance.name }}"
-                                        data-refresh='{{ plugin_instance.refresh | tojson }}'>
+                                        data-refresh='{{ plugin_instance.refresh | tojson }}'
+                                        data-display-duration="{{ plugin_instance.display_duration or '' }}">
                                     <img src="{{ url_for('static', filename='icons/clock.svg') }}" alt="refresh settings" class="action-icon">
                                 </button>
                                 <button class="edit-button" title="Display Now" onclick="displayPluginInstance('{{ playlist.name }}', '{{ plugin_instance.plugin_id }}','{{ plugin_instance.name }}')">

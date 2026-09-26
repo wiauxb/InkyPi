@@ -7,10 +7,13 @@ import pytz
 from datetime import datetime, timezone
 from plugins.plugin_registry import get_plugin_instance
 from utils.image_utils import compute_image_hash
-from model import RefreshInfo, PlaylistManager
+from model import RefreshInfo
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+PLAYLIST_REFRESH_TYPE = "Playlist"
+MANUAL_REFRESH_TYPE = "Manual Update"
 
 class RefreshTask:
     """Handles the logic for refreshing the display using a background thread."""
@@ -49,12 +52,13 @@ class RefreshTask:
     def _run(self):
         """Background task that manages the periodic refresh of the display.
 
-        This function runs in a loop, sleeping for a configured duration (`plugin_cycle_interval_seconds`) or until
-        manually triggered via `manual_update()`. Determines the next plugin to refresh based on active playlists and
+        This function runs in a loop, sleeping until the currently displayed playlist item's display duration
+        expires (its own `display_duration`, or `plugin_cycle_interval_seconds` when unset) or until manually
+        triggered via `manual_update()`. Determines the next plugin to refresh based on active playlists and
         updates the display accordingly.
 
         Workflow:
-        1. Waits for the configured sleep duration or until notified of a manual update.
+        1. Waits until the current item's slot ends or until notified of a manual update / config change.
         2. Checks if a manual update has been requested:
         - If so, refreshes the specified plugin immediately.
         3. Otherwise, determines the next plugin to refresh based on the active playlist and generates an image.
@@ -73,7 +77,10 @@ class RefreshTask:
         while True:
             try:
                 with self.condition:
-                    sleep_time = self.device_config.get_config("plugin_cycle_interval_seconds", default=60*60)
+                    sleep_time = self._compute_sleep_time(
+                        self.device_config.get_playlist_manager(),
+                        self.device_config.get_refresh_info(),
+                        self._get_current_datetime())
 
                     # Wait for sleep_time or until notified
                     self.condition.wait(timeout=sleep_time)
@@ -89,11 +96,14 @@ class RefreshTask:
                     current_dt = self._get_current_datetime()
 
                     refresh_action = None
+                    # True when a different playlist item takes the screen, which starts a new display slot.
+                    new_slot = False
                     if self.manual_update_request:
                         # handle immediate update request
                         logger.info("Manual update requested")
                         refresh_action = self.manual_update_request
                         self.manual_update_request = ()
+                        new_slot = True
                     else:
 
                         if self.device_config.get_config("log_system_stats"):
@@ -104,6 +114,7 @@ class RefreshTask:
                         playlist, plugin_instance = self._determine_next_plugin(playlist_manager, latest_refresh, current_dt)
                         if plugin_instance:
                             refresh_action = PlaylistRefresh(playlist, plugin_instance)
+                            new_slot = True
 
                     if refresh_action:
                         plugin_config = self.device_config.get_plugin(refresh_action.get_plugin_id())
@@ -116,6 +127,10 @@ class RefreshTask:
 
                         refresh_info = refresh_action.get_refresh_info()
                         refresh_info.update({"refresh_time": current_dt.isoformat(), "image_hash": image_hash})
+                        if new_slot:
+                            refresh_info["slot_start_time"] = current_dt.isoformat()
+                        elif latest_refresh.slot_start_time:
+                            refresh_info["slot_start_time"] = latest_refresh.slot_start_time
                         # check if image is the same as current image
                         if image_hash != latest_refresh.image_hash:
                             logger.info(f"Updating display. | refresh_info: {refresh_info}")
@@ -160,8 +175,42 @@ class RefreshTask:
         tz_str = self.device_config.get_config("timezone", default="UTC")
         return datetime.now(pytz.timezone(tz_str))
 
+    def _get_global_cycle_interval(self):
+        """Returns the device-wide plugin cycle interval in seconds."""
+        return self.device_config.get_config("plugin_cycle_interval_seconds", default=3600)
+
+    def _current_slot(self, playlist_manager, latest_refresh_info, current_dt):
+        """Describes the playlist item currently on screen.
+
+        Returns (instance, slot_seconds, elapsed_seconds). `instance` is None when nothing from a playlist
+        is on screen (first run, manual update, or the item was deleted); `slot_seconds` then falls back to
+        the global cycle interval and `elapsed_seconds` is None.
+        """
+        global_interval = self._get_global_cycle_interval()
+        if latest_refresh_info is None or latest_refresh_info.refresh_type != PLAYLIST_REFRESH_TYPE:
+            return None, global_interval, None
+
+        instance = playlist_manager.find_plugin(latest_refresh_info.plugin_id, latest_refresh_info.plugin_instance)
+        if instance is None:
+            return None, global_interval, None
+
+        slot_start = latest_refresh_info.get_slot_start_datetime()
+        elapsed = (current_dt - slot_start).total_seconds() if slot_start else None
+        return instance, instance.get_display_duration(global_interval), elapsed
+
+    def _compute_sleep_time(self, playlist_manager, latest_refresh_info, current_dt):
+        """Seconds to sleep before the next scheduling check: until the current item's slot ends."""
+        instance, slot_seconds, elapsed = self._current_slot(playlist_manager, latest_refresh_info, current_dt)
+        if instance is None or elapsed is None:
+            return slot_seconds
+        remaining = slot_seconds - elapsed
+        # When the slot is already over but nothing advanced (e.g. no active playlist), sleep a full slot
+        # rather than spinning.
+        return remaining if remaining > 0 else slot_seconds
+
     def _determine_next_plugin(self, playlist_manager, latest_refresh_info, current_dt):
-        """Determines the next plugin to refresh based on the active playlist, plugin cycle interval, and current time."""
+        """Determines the next plugin to refresh based on the active playlist, the current item's display duration,
+        and the current time."""
         playlist = playlist_manager.determine_active_playlist(current_dt)
         if not playlist:
             playlist_manager.active_playlist = None
@@ -173,13 +222,9 @@ class RefreshTask:
             logger.info(f"Active playlist '{playlist.name}' has no plugins.")
             return None, None
 
-        latest_refresh_dt = latest_refresh_info.get_refresh_datetime()
-        plugin_cycle_interval = self.device_config.get_config("plugin_cycle_interval_seconds", default=3600)
-        should_refresh = PlaylistManager.should_refresh(latest_refresh_dt, plugin_cycle_interval, current_dt)
-
-        if not should_refresh:
-            latest_refresh_str = latest_refresh_dt.strftime('%Y-%m-%d %H:%M:%S') if latest_refresh_dt else "None"
-            logger.info(f"Not time to update display. | latest_update: {latest_refresh_str} | plugin_cycle_interval: {plugin_cycle_interval}")
+        instance, slot_seconds, elapsed = self._current_slot(playlist_manager, latest_refresh_info, current_dt)
+        if instance is not None and elapsed is not None and elapsed < slot_seconds:
+            logger.info(f"Not time to update display. | current_instance: {instance.name} | elapsed: {int(elapsed)}s | display_duration: {slot_seconds}s")
             return None, None
 
         plugin = playlist.get_next_plugin()
@@ -235,7 +280,7 @@ class ManualRefresh(RefreshAction):
 
     def get_refresh_info(self):
         """Return refresh metadata as a dictionary."""
-        return {"refresh_type": "Manual Update", "plugin_id": self.plugin_id}
+        return {"refresh_type": MANUAL_REFRESH_TYPE, "plugin_id": self.plugin_id}
 
     def get_plugin_id(self):
         """Return the plugin ID associated with this refresh."""
@@ -257,7 +302,7 @@ class PlaylistRefresh(RefreshAction):
     def get_refresh_info(self):
         """Return refresh metadata as a dictionary."""
         return {
-            "refresh_type": "Playlist",
+            "refresh_type": PLAYLIST_REFRESH_TYPE,
             "playlist": self.playlist.name,
             "plugin_id": self.plugin_instance.plugin_id,
             "plugin_instance": self.plugin_instance.name
