@@ -13,6 +13,16 @@ InkyPi is an open-source, customizable E-Ink display powered by a Raspberry Pi. 
 - Easy installation and configuration, perfect for beginners and makers alike
 - Open source project allowing you to modify, customize, and create your own plugins
 - Set up scheduled playlists to display different plugins at designated times
+- Per-item display durations, timed events, and live refresh of the item on screen (this fork, see below)
+
+**Scheduling (this fork)**:
+
+This fork of [fatihak/InkyPi](https://github.com/fatihak/InkyPi) extends the playlist scheduler:
+
+- **Display duration per item.** The display cycles through the active playlist using the *Plugin Cycle Interval* from Settings, but each playlist item can override it with its own *Display duration* in its refresh settings. A clock can stay up for 55 minutes and the weather for 5. Items left on "Use default" keep the global interval.
+- **Playlist windows are enforced.** One pass through a playlist's items must fit inside its time window. Adding or editing an item, changing a playlist's window, or changing the global interval is refused when it would not fit; the playlist page shows "Items X of Y". If the items take less than the window, the playlist loops until the window ends.
+- **Events.** An event shows one screen in a fixed window on a specific date or on chosen weekdays and always takes over from playlists. Create it from the Playlists page ("New Event"), then add a plugin to it from the plugin page by picking "Event: name" as the target.
+- **The item on screen stays fresh.** Its own refresh rule (every N minutes, or daily at a time) now runs while it is displayed, not just when it first appears. Refresh rate controls how often the image is regenerated; display duration controls how long it stays up. Note that e-ink panels take several seconds to rewrite and only change when the image changed, so a clock refreshed every minute rewrites every minute.
 
 **Plugins**:
 
