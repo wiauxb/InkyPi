@@ -221,7 +221,7 @@
             document.querySelectorAll("#eventForm .event-day").forEach(cb => cb.checked = false);
             document.getElementById("event_start_time").value = "12:00";
             document.getElementById("event_end_time").value = "12:15";
-            document.getElementById("eventSaveButton").setAttribute("onclick", "createEvent()");
+            document.getElementById("eventSaveButton").setAttribute("onclick", "submitNewEvent()");
             document.getElementById("eventDeleteButton").classList.add("hidden");
             syncEventDateAndDays();
             document.getElementById("eventModal").style.display = "block";
@@ -237,7 +237,7 @@
             });
             document.getElementById("event_start_time").value = startTime;
             document.getElementById("event_end_time").value = endTime;
-            document.getElementById("eventSaveButton").setAttribute("onclick", "updateEvent()");
+            document.getElementById("eventSaveButton").setAttribute("onclick", "submitEventUpdate()");
             document.getElementById("eventDeleteButton").classList.remove("hidden");
             syncEventDateAndDays();
             document.getElementById("eventModal").style.display = "block";
@@ -285,16 +285,16 @@
             }
         }
 
-        async function createEvent() {
+        async function submitNewEvent() {
             await submitEvent("{{ url_for('playlist.create_event') }}", "POST", readEventForm());
         }
 
-        async function updateEvent() {
+        async function submitEventUpdate() {
             const oldName = document.getElementById("editingEventName").value;
             await submitEvent("{{ url_for('playlist.update_event', event_name='') }}" + encodeURIComponent(oldName), "PUT", readEventForm());
         }
 
-        async function deleteEvent() {
+        async function submitEventDelete() {
             const name = document.getElementById("editingEventName").value;
             await submitEvent("{{ url_for('playlist.delete_event', event_name='') }}" + encodeURIComponent(name), "DELETE");
         }
@@ -735,7 +735,7 @@
             </form>
             <div class="buttons-container">
                 <button type="button" class="action-button" id="eventSaveButton">Save</button>
-                <button type="button" class="action-button warn hidden" id="eventDeleteButton" onclick="deleteEvent()">Delete</button>
+                <button type="button" class="action-button warn hidden" id="eventDeleteButton" onclick="submitEventDelete()">Delete</button>
             </div>
         </div>
     </div>
