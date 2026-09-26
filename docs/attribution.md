@@ -52,6 +52,8 @@ This project uses various fonts and icons, each with specific licensing terms. B
 | <img src="../src/plugins/weather/icons/wind.png" width="32" height="32"> |<a href="https://www.flaticon.com/free-icons/wind" title="wind icons">Wind icons created by riajulislam - Flaticon</a>|
 
 ## Waveshare e-Paper
+This project bundles [SortableJS](https://github.com/SortableJS/Sortable) (`src/static/scripts/sortable.min.js`) for drag-and-drop reordering, licensed under the MIT license, Copyright (c) 2019 All contributors to Sortable.
+
 This project includes Waveshare e-Paper display drivers licensed under an MIT license.
 
 See [Waveshare Team Github](https://github.com/waveshare/e-Paper) for further details.

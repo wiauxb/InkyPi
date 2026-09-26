@@ -37,6 +37,35 @@ def _parse_event_payload(data):
         return None, "End time must be after start time"
     return {"name": name, "start_time": start_time, "end_time": end_time, "date": date, "days": days}, None
 
+@playlist_bp.route('/move_plugin_instance', methods=['POST'])
+def move_plugin_instance():
+    """Reorders an item, or moves it to another playlist or event (drag and drop)."""
+    device_config = current_app.config['DEVICE_CONFIG']
+    playlist_manager = device_config.get_playlist_manager()
+
+    data = request.get_json() or {}
+    source, destination = data.get("source"), data.get("destination")
+    plugin_id, instance_name = data.get("plugin_id"), data.get("plugin_instance")
+    index, mode = data.get("index"), data.get("mode", "move")
+    if not all([source, destination, plugin_id, instance_name]):
+        return jsonify({"error": "Missing required fields"}), 400
+    if index is not None and (not isinstance(index, int) or index < 0):
+        return jsonify({"error": "Index must be a non-negative integer"}), 400
+
+    global_interval = device_config.get_config("plugin_cycle_interval_seconds", default=3600)
+    error, displaced = playlist_manager.move_plugin(source, plugin_id, instance_name, destination, index,
+                                                    global_interval, mode=mode)
+    if error:
+        return jsonify({"error": error}), 400
+    if displaced is not None:
+        from blueprints.plugin import _delete_plugin_instance_images
+        _delete_plugin_instance_images(device_config, displaced)
+
+    device_config.write_config()
+    # the item on screen may have moved, or the active event's screen changed
+    current_app.config['REFRESH_TASK'].signal_config_change()
+    return jsonify({"success": True, "message": f"Moved '{instance_name}' to '{destination}'."})
+
 @playlist_bp.route('/create_event', methods=['POST'])
 def create_event():
     device_config = current_app.config['DEVICE_CONFIG']
@@ -308,6 +337,18 @@ def format_duration(seconds):
     if hours:
         return f"{hours} h"
     return f"{minutes} min"
+
+@playlist_bp.app_template_filter('format_duration_short')
+def format_duration_short(seconds):
+    """Compact duration for badges: '5m', '1h', '1h30'."""
+    seconds = int(seconds or 0)
+    hours, remainder = divmod(seconds, 3600)
+    minutes = remainder // 60
+    if hours and minutes:
+        return f"{hours}h{minutes:02d}"
+    if hours:
+        return f"{hours}h"
+    return f"{minutes}m"
 
 @playlist_bp.app_template_filter('format_relative_time')
 def format_relative_time(iso_date_string):

@@ -211,6 +211,60 @@ class PlaylistManager:
                 return error
         return None
 
+    MOVE_MODES = ("move", "replace", "swap")
+
+    def move_plugin(self, source_name, plugin_id, name, dest_name, index, global_seconds, mode="move"):
+        """Moves an instance within or between playlists and events.
+
+        `index` is the target position in a playlist (ignored for events). When the destination is an
+        event that already has a screen, `mode` decides: "replace" drops the event's current screen,
+        "swap" sends it back to where the moved item came from. Returns (error, displaced_instance):
+        `error` is a message or None, `displaced_instance` is the replaced screen the caller should clean
+        up (only for "replace").
+        """
+        if mode not in self.MOVE_MODES:
+            return "Unknown move mode", None
+        source = self.get_playlist_or_event(source_name)
+        dest = self.get_playlist_or_event(dest_name)
+        if source is None or dest is None:
+            return "Playlist or event not found", None
+        instance = source.find_plugin(plugin_id, name)
+        if instance is None:
+            return f"Plugin instance '{name}' not found in '{source_name}'", None
+
+        if isinstance(dest, Playlist):
+            if dest is not source:
+                # entering a playlist from an event, the item runs on the global interval
+                probe = PluginInstance(plugin_id, name, {}, instance.refresh,
+                                       display_duration=instance.display_duration if isinstance(source, Playlist) else None)
+                error = dest.validate_durations(global_seconds, extra_plugin=probe)
+                if error:
+                    return error, None
+            moved = source.pop_plugin(plugin_id, name)
+            dest.insert_plugin(moved, index)
+            return None, None
+
+        # destination is an event
+        displaced = dest.plugin
+        if displaced is not None and mode == "move":
+            return f"Event '{dest.name}' already shows '{displaced.name}'. Choose replace or swap.", None
+        if displaced is not None and mode == "swap" and isinstance(source, Playlist):
+            # the displaced screen takes the moved item's place, on the global interval
+            probe = PluginInstance(displaced.plugin_id, displaced.name, {}, displaced.refresh)
+            without_moved = Playlist(source.name, source.start_time, source.end_time,
+                                     [p.to_dict() for p in source.plugins if p is not instance])
+            error = without_moved.validate_durations(global_seconds, extra_plugin=probe)
+            if error:
+                return error, None
+
+        old_index = source.index_of(plugin_id, name) if isinstance(source, Playlist) else None
+        moved = source.pop_plugin(plugin_id, name)
+        dest.insert_plugin(moved)
+        if displaced is not None and mode == "swap":
+            source.insert_plugin(displaced, old_index)
+            return None, None
+        return None, displaced if mode == "replace" else None
+
     def determine_active_playlist(self, current_datetime):
         """Determine the active playlist based on the current time."""
         current_time = current_datetime.strftime("%H:%M")  # Get current time in "HH:MM" format
@@ -358,6 +412,45 @@ class Playlist:
                 return True
         return False
 
+    def index_of(self, plugin_id, name):
+        """Position of the given instance in the rotation, or None."""
+        return next((i for i, p in enumerate(self.plugins) if p.plugin_id == plugin_id and p.name == name), None)
+
+    def _current_instance(self):
+        if self.current_plugin_index is None or not (0 <= self.current_plugin_index < len(self.plugins)):
+            return None
+        return self.plugins[self.current_plugin_index]
+
+    def _restore_cursor(self, current, fallback_index):
+        """Points the cursor back at `current` after the list changed, or at `fallback_index` if it is gone."""
+        if current is not None and self.set_current_plugin(current):
+            return
+        if not self.plugins:
+            self.current_plugin_index = None
+        elif fallback_index is not None:
+            self.current_plugin_index = max(min(fallback_index, len(self.plugins) - 1), 0)
+
+    def pop_plugin(self, plugin_id, name):
+        """Removes and returns the given instance, keeping the rotation cursor on the item it pointed at."""
+        index = self.index_of(plugin_id, name)
+        if index is None:
+            return None
+        current = self._current_instance()
+        instance = self.plugins.pop(index)
+        # if the removed item was the current one, the previous item becomes current so the next advance
+        # shows what would have followed the removed item
+        self._restore_cursor(None if current is instance else current, index - 1)
+        return instance
+
+    def insert_plugin(self, instance, index=None):
+        """Inserts an existing instance at the given position (end when None), keeping the cursor on its item."""
+        current = self._current_instance()
+        if index is None or index > len(self.plugins):
+            index = len(self.plugins)
+        self.plugins.insert(max(index, 0), instance)
+        self._restore_cursor(current, self.current_plugin_index)
+        return True
+
     def total_item_duration(self, global_seconds):
         """Seconds needed to show every item once, using the global cycle interval for items without an override."""
         return sum(p.get_display_duration(global_seconds) for p in self.plugins)
@@ -472,6 +565,19 @@ class Event:
             self.plugin = None
             return True
         return False
+
+    def pop_plugin(self, plugin_id, name):
+        """Removes and returns the event's screen if it matches."""
+        instance = self.find_plugin(plugin_id, name)
+        if instance:
+            self.plugin = None
+        return instance
+
+    def insert_plugin(self, instance, index=None):
+        """Sets the event's single screen; an event's screen carries no display duration."""
+        instance.display_duration = None
+        self.plugin = instance
+        return True
 
     def get_next_plugin(self):
         return self.plugin

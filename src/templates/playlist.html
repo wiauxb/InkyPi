@@ -17,7 +17,70 @@
     <script src="{{ url_for('static', filename='scripts/dark_mode.js') }}"></script>
     <script src="{{ url_for('static', filename='scripts/response_modal.js') }}"></script>
     <script src="{{ url_for('static', filename='scripts/refresh_settings_manager.js') }}"></script>
+    <script src="{{ url_for('static', filename='scripts/sortable.min.js') }}"></script>
     <style>
+        /* Drag handle for reordering and moving items */
+        .drag-handle {
+            cursor: grab;
+            color: var(--text-secondary);
+            font-size: 18px;
+            line-height: 1;
+            padding: 0 4px;
+            user-select: none;
+            touch-action: none;
+        }
+
+        .drag-handle:active {
+            cursor: grabbing;
+        }
+
+        .sortable-ghost {
+            opacity: 0.4;
+        }
+
+        .sortable-drag {
+            background-color: var(--modal-bg);
+            box-shadow: 0 4px 12px var(--shadow-medium);
+        }
+
+        .plugin-list.drop-target {
+            outline: 2px dashed var(--accent-primary);
+            outline-offset: -2px;
+        }
+
+        /* Display duration lives inside the refresh-settings button: the clock icon on rest, the
+           duration on hover; on touch devices (no hover) the duration is always shown beside the icon */
+        .refresh-settings-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .refresh-settings-btn .duration-label {
+            display: none;
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
+            color: var(--text-primary);
+        }
+
+        .refresh-settings-btn .duration-label.default {
+            opacity: 0.6;
+        }
+
+        .refresh-settings-btn:hover .action-icon {
+            display: none;
+        }
+
+        .refresh-settings-btn:hover .duration-label {
+            display: inline;
+        }
+
+        @media (hover: none) {
+            .refresh-settings-btn .duration-label {
+                display: inline;
+            }
+        }
+
         /* Plugin Instance Thumbnail */
         .plugin-thumbnail-container {
             position: relative;
@@ -294,6 +357,88 @@
             await submitEvent("{{ url_for('playlist.update_event', event_name='') }}" + encodeURIComponent(oldName), "PUT", readEventForm());
         }
 
+        // ---- Drag and drop -------------------------------------------------------------------
+
+        // Lets the drop dialog resolve with "replace", "swap" or null (cancel)
+        let dropDecision = null;
+        function askDropMode(itemName, eventName, currentName) {
+            document.getElementById("dropConfirmText").textContent =
+                `Event "${eventName}" already shows "${currentName}". Replace it with "${itemName}", or swap the two?`;
+            document.getElementById("dropConfirmModal").style.display = "block";
+            return new Promise(resolve => { dropDecision = resolve; });
+        }
+
+        function resolveDrop(mode) {
+            document.getElementById("dropConfirmModal").style.display = "none";
+            if (dropDecision) { dropDecision(mode); dropDecision = null; }
+        }
+
+        function revertDrag(evt) {
+            const from = evt.from;
+            const siblings = Array.from(from.querySelectorAll(":scope > .plugin-item"));
+            const before = siblings[evt.oldDraggableIndex] || null;
+            from.insertBefore(evt.item, before);
+        }
+
+        async function handleDrop(evt) {
+            const sameList = evt.from === evt.to;
+            if (sameList && evt.oldDraggableIndex === evt.newDraggableIndex) return;
+
+            const item = evt.item;
+            const source = evt.from.dataset.owner;
+            const destination = evt.to.dataset.owner;
+            const destKind = evt.to.dataset.kind;
+            let mode = "move";
+
+            if (destKind === "event" && !sameList) {
+                const others = Array.from(evt.to.querySelectorAll(":scope > .plugin-item")).filter(el => el !== item);
+                if (others.length) {
+                    mode = await askDropMode(item.dataset.instance, destination, others[0].dataset.instance);
+                    if (!mode) { revertDrag(evt); return; }
+                }
+            }
+
+            try {
+                const response = await fetch("{{ url_for('playlist.move_plugin_instance') }}", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        source, destination, mode,
+                        plugin_id: item.dataset.pluginId,
+                        plugin_instance: item.dataset.instance,
+                        index: destKind === "playlist" ? evt.newDraggableIndex : null
+                    })
+                });
+                const result = await response.json();
+                if (response.ok) {
+                    sessionStorage.setItem("storedMessage", JSON.stringify({ type: "success", text: `Success! ${result.message}` }));
+                    location.reload();
+                } else {
+                    revertDrag(evt);
+                    showResponseModal('failure', `Error!  ${result.error}`);
+                }
+            } catch (error) {
+                console.error("Error:", error);
+                revertDrag(evt);
+                alert('An error occurred while processing your request.');
+            }
+        }
+
+        document.addEventListener("DOMContentLoaded", () => {
+            document.querySelectorAll(".plugin-list").forEach(list => {
+                new Sortable(list, {
+                    group: "inky-items",
+                    handle: ".drag-handle",
+                    draggable: ".plugin-item",
+                    animation: 150,
+                    forceFallback: true,       // same pointer-based dragging on desktop and touch
+                    fallbackTolerance: 4,
+                    onMove: () => { document.querySelectorAll(".plugin-list").forEach(l => l.classList.remove("drop-target")); },
+                    onEnd: handleDrop
+                });
+            });
+        });
+
         async function submitEventDelete() {
             const name = document.getElementById("editingEventName").value;
             await submitEvent("{{ url_for('playlist.delete_event', event_name='') }}" + encodeURIComponent(name), "DELETE");
@@ -566,10 +711,11 @@
                         <button class="edit-button" onclick="openEditModal('{{ playlist.name }}', '{{ playlist.start_time }}','{{ playlist.end_time }}')"><img src="{{ url_for('static', filename='icons/settings.png') }}" alt="edit playlist" class="action-icon"></button>
                     </div>
                     <!-- Plugin List -->
-                    <div class="plugin-list">
+                    <div class="plugin-list" data-owner="{{ playlist.name }}" data-kind="playlist">
                         {% for plugin_instance in playlist.plugins %}
-                        <div class="plugin-item">
+                        <div class="plugin-item" data-plugin-id="{{ plugin_instance.plugin_id }}" data-instance="{{ plugin_instance.name }}">
                             <div class="plugin-info" id="{{plugin_instance.name}}">
+                                <span class="drag-handle" title="Drag to reorder, or drop onto another playlist or event">&#x2807;</span>
                                 <img src="{{ url_for('plugin.image', plugin_id=plugin_instance.plugin_id, filename='icon.png') }}" alt="Plugin Icon" class="plugin-icon">
                                 <span class="plugin-instance">{{ plugin_instance.name }}</span>
 
@@ -600,25 +746,23 @@
                                         Refreshed {{ refresh_time }}
                                     </span>
                                 {% endif %}
-                                <span class="latest-refresh" title="How long this item stays on screen before the playlist moves on">
-                                    {% if plugin_instance.display_duration %}
-                                        Shown for {{ plugin_instance.display_duration | format_duration }}
-                                    {% else %}
-                                        Shown for {{ plugin_cycle_interval_seconds | format_duration }} (default)
-                                    {% endif %}
-                                </span>
 
                                 <a href="{{ url_for('plugin.plugin_page', plugin_id=plugin_instance.plugin_id) }}?instance={{ plugin_instance.name }}" class="edit-button">
                                     <img src="{{ url_for('static', filename='icons/edit.png') }}" alt="edit plugin" class="action-icon">
                                 </a>
                                 <button class="edit-button refresh-settings-btn"
-                                        title="Edit Refresh Settings"
+                                        title="Refresh settings. Shown for {% if plugin_instance.display_duration %}{{ plugin_instance.display_duration | format_duration }}{% else %}{{ plugin_cycle_interval_seconds | format_duration }} (default){% endif %} before the playlist moves on."
                                         data-playlist="{{ playlist.name }}"
                                         data-plugin-id="{{ plugin_instance.plugin_id }}"
                                         data-instance="{{ plugin_instance.name }}"
                                         data-refresh='{{ plugin_instance.refresh | tojson }}'
                                         data-display-duration="{{ plugin_instance.display_duration or '' }}">
                                     <img src="{{ url_for('static', filename='icons/clock.svg') }}" alt="refresh settings" class="action-icon">
+                                    {% if plugin_instance.display_duration %}
+                                    <span class="duration-label">{{ plugin_instance.display_duration | format_duration_short }}</span>
+                                    {% else %}
+                                    <span class="duration-label default">{{ plugin_cycle_interval_seconds | format_duration_short }}</span>
+                                    {% endif %}
                                 </button>
                                 <button class="edit-button" title="Display Now" onclick="displayPluginInstance('{{ playlist.name }}', '{{ plugin_instance.plugin_id }}','{{ plugin_instance.name }}')">
                                     <img src="{{ url_for('static', filename='icons/display.png') }}" alt="display now" class="action-icon">
@@ -652,11 +796,12 @@
                         {% if not event.plugin %}<span class="event-badge">empty</span>{% endif %}
                         <button class="edit-button" onclick='openEditEventModal({{ event.name | tojson }}, {{ event.start_time | tojson }}, {{ event.end_time | tojson }}, {{ event.date | tojson }}, {{ event.days | tojson }})'><img src="{{ url_for('static', filename='icons/settings.png') }}" alt="edit event" class="action-icon"></button>
                     </div>
-                    <div class="plugin-list">
+                    <div class="plugin-list" data-owner="{{ event.name }}" data-kind="event">
                         {% if event.plugin %}
                         {% set plugin_instance = event.plugin %}
-                        <div class="plugin-item">
+                        <div class="plugin-item" data-plugin-id="{{ plugin_instance.plugin_id }}" data-instance="{{ plugin_instance.name }}">
                             <div class="plugin-info" id="{{plugin_instance.name}}">
+                                <span class="drag-handle" title="Drag to move this screen to a playlist or another event">&#x2807;</span>
                                 <img src="{{ url_for('plugin.image', plugin_id=plugin_instance.plugin_id, filename='icon.png') }}" alt="Plugin Icon" class="plugin-icon">
                                 <span class="plugin-instance">{{ plugin_instance.name }}</span>
                                 {% if plugin_instance.latest_refresh_time %}
@@ -694,13 +839,28 @@
                             </div>
                         </div>
                         {% else %}
-                        <div class="event-empty">No screen yet. Open a plugin, choose "Add to Playlist" and pick "Event: {{ event.name }}".</div>
+                        <div class="event-empty">No screen yet. Drag an item here, or open a plugin, choose "Add to Playlist" and pick "Event: {{ event.name }}".</div>
                         {% endif %}
                     </div>
             </div>
             {% endfor %}
         </div>
         {% endif %}
+    </div>
+
+    <!-- Drop onto a non-empty event: replace or swap -->
+    <div id="dropConfirmModal" class="modal">
+        <div class="modal-content">
+            <span class="close-button" onclick="resolveDrop(null)">×</span>
+            <h2>Event already has a screen</h2>
+            <div class="separator"></div>
+            <p id="dropConfirmText"></p>
+            <div class="buttons-container">
+                <button type="button" class="action-button" onclick="resolveDrop('replace')">Replace</button>
+                <button type="button" class="action-button" onclick="resolveDrop('swap')">Swap</button>
+                <button type="button" class="action-button warn" onclick="resolveDrop(null)">Cancel</button>
+            </div>
+        </div>
     </div>
 
     <!-- Event Modal -->

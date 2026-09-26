@@ -109,10 +109,117 @@ class TestPlaylistManagerEvents:
         assert manager.seconds_until_next_boundary(NOW) == 14 * 3600
         assert PlaylistManager([]).seconds_until_next_boundary(NOW) is None
 
-    def test_next_occurrence(self):
+    def test_next_occurrence_helper(self):
         assert next_occurrence("10:30", NOW) == NOW + timedelta(minutes=30)
         assert next_occurrence("10:00", NOW) == NOW + timedelta(days=1)
         assert next_occurrence("24:00", NOW) == NOW + timedelta(hours=14)
+
+
+def _items(*names, duration=None):
+    return [{"plugin_id": "p", "name": n, "plugin_settings": {}, "refresh": {"interval": 60}, "display_duration": duration}
+            for n in names]
+
+
+class TestPlaylistReorder:
+
+    def test_pop_and_insert_keep_cursor_on_current_item(self):
+        playlist = Playlist("P", "00:00", "24:00", _items("A", "B", "C"))
+        playlist.current_plugin_index = 1                     # B is current
+        moved = playlist.pop_plugin("p", "A")
+        assert moved.name == "A" and [p.name for p in playlist.plugins] == ["B", "C"]
+        assert playlist.plugins[playlist.current_plugin_index].name == "B"
+        playlist.insert_plugin(moved, 2)
+        assert [p.name for p in playlist.plugins] == ["B", "C", "A"]
+        assert playlist.plugins[playlist.current_plugin_index].name == "B"
+
+    def test_removing_current_item_points_cursor_at_previous(self):
+        playlist = Playlist("P", "00:00", "24:00", _items("A", "B", "C"))
+        playlist.current_plugin_index = 1
+        playlist.pop_plugin("p", "B")
+        assert playlist.plugins[playlist.current_plugin_index].name == "A"
+        assert playlist.get_next_plugin().name == "C"
+
+    def test_insert_index_is_clamped(self):
+        playlist = Playlist("P", "00:00", "24:00", _items("A"))
+        playlist.insert_plugin(PluginInstance.from_dict(_items("Z")[0]), 99)
+        assert [p.name for p in playlist.plugins] == ["A", "Z"]
+
+
+class TestMovePlugin:
+
+    def _manager(self):
+        manager = PlaylistManager([
+            Playlist("Day", "08:00", "20:00", _items("A", "B", "C", duration=600)),
+            Playlist("Short", "09:00", "09:10", _items("S", duration=300)),
+        ])
+        manager.add_event("Party", "10:00", "10:05", date="2026-09-26")
+        manager.get_event("Party").add_plugin({"plugin_id": "p", "name": "E", "plugin_settings": {},
+                                               "refresh": {"interval": 60}})
+        return manager
+
+    def test_reorder_within_playlist(self):
+        manager = self._manager()
+        error, displaced = manager.move_plugin("Day", "p", "C", "Day", 0, 3600)
+        assert error is None and displaced is None
+        assert [p.name for p in manager.get_playlist("Day").plugins] == ["C", "A", "B"]
+
+    def test_move_between_playlists_validates_window(self):
+        manager = self._manager()
+        error, _ = manager.move_plugin("Day", "p", "A", "Short", 0, 3600)   # 600 + 300 = 900 > 600
+        assert "Short" in error
+        assert manager.find_plugin_owner("p", "A").name == "Day"
+        manager.get_playlist("Day").plugins[0].display_duration = 200   # 200 + 300 fits in 600
+        error, _ = manager.move_plugin("Day", "p", "A", "Short", 1, 3600)
+        assert error is None
+        assert [p.name for p in manager.get_playlist("Short").plugins] == ["S", "A"]
+
+    def test_move_to_empty_event_drops_display_duration(self):
+        manager = self._manager()
+        manager.get_event("Party").plugin = None
+        error, displaced = manager.move_plugin("Day", "p", "A", "Party", None, 3600)
+        assert error is None and displaced is None
+        assert manager.get_event("Party").plugin.name == "A"
+        assert manager.get_event("Party").plugin.display_duration is None
+        assert manager.get_playlist("Day").find_plugin("p", "A") is None
+
+    def test_move_to_full_event_requires_a_mode(self):
+        manager = self._manager()
+        error, _ = manager.move_plugin("Day", "p", "A", "Party", None, 3600)
+        assert "replace or swap" in error
+
+    def test_replace_returns_displaced_screen(self):
+        manager = self._manager()
+        error, displaced = manager.move_plugin("Day", "p", "A", "Party", None, 3600, mode="replace")
+        assert error is None and displaced.name == "E"
+        assert manager.get_event("Party").plugin.name == "A"
+        assert manager.find_plugin("p", "E") is None
+
+    def test_swap_puts_event_screen_where_item_was(self):
+        manager = self._manager()
+        error, displaced = manager.move_plugin("Day", "p", "B", "Party", None, 3600, mode="swap")
+        assert error is None and displaced is None
+        assert manager.get_event("Party").plugin.name == "B"
+        assert [p.name for p in manager.get_playlist("Day").plugins] == ["A", "E", "C"]
+        assert manager.get_playlist("Day").find_plugin("p", "E").display_duration is None
+
+    def test_swap_validates_source_window_for_incoming_screen(self):
+        manager = self._manager()   # Short is 10 min; S is 5 min; incoming E would use the 1 h global
+        error, _ = manager.move_plugin("Short", "p", "S", "Party", None, 3600, mode="swap")
+        assert "Short" in error
+        assert manager.get_playlist("Short").find_plugin("p", "S") is not None
+
+    def test_event_to_playlist(self):
+        manager = self._manager()
+        error, _ = manager.move_plugin("Party", "p", "E", "Day", 1, 3600)
+        assert error is None
+        assert [p.name for p in manager.get_playlist("Day").plugins] == ["A", "E", "B", "C"]
+        assert manager.get_event("Party").plugin is None
+
+    def test_unknown_names(self):
+        manager = self._manager()
+        assert manager.move_plugin("Nope", "p", "A", "Day", 0, 3600)[0]
+        assert manager.move_plugin("Day", "p", "Nope", "Day", 0, 3600)[0]
+        assert manager.move_plugin("Day", "p", "A", "Day", 0, 3600, mode="teleport")[0]
 
 
 def _instance(**overrides):
