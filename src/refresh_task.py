@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 
 PLAYLIST_REFRESH_TYPE = "Playlist"
 MANUAL_REFRESH_TYPE = "Manual Update"
+# Never wake more often than this; after a failed refresh back off further so a broken plugin cannot spin the loop.
+MIN_SLEEP_SECONDS = 1
+FAILURE_BACKOFF_SECONDS = 60
 
 class RefreshTask:
     """Handles the logic for refreshing the display using a background thread."""
@@ -31,6 +34,7 @@ class RefreshTask:
         self.refresh_event = threading.Event()
         self.refresh_event.set()
         self.refresh_result = {}
+        self.last_refresh_failed = False
 
     def start(self):
         """Starts the background thread for refreshing the display."""
@@ -53,15 +57,17 @@ class RefreshTask:
         """Background task that manages the periodic refresh of the display.
 
         This function runs in a loop, sleeping until the currently displayed playlist item's display duration
-        expires (its own `display_duration`, or `plugin_cycle_interval_seconds` when unset) or until manually
-        triggered via `manual_update()`. Determines the next plugin to refresh based on active playlists and
-        updates the display accordingly.
+        expires (its own `display_duration`, or `plugin_cycle_interval_seconds` when unset), until that item's
+        own refresh rule is due, or until manually triggered via `manual_update()`. Determines the next plugin
+        to refresh based on active playlists and updates the display accordingly.
 
         Workflow:
-        1. Waits until the current item's slot ends or until notified of a manual update / config change.
+        1. Waits until the current item's slot ends, its refresh rule fires, or a manual update / config change
+           notifies the thread.
         2. Checks if a manual update has been requested:
         - If so, refreshes the specified plugin immediately.
         3. Otherwise, determines the next plugin to refresh based on the active playlist and generates an image.
+           If the current item is not due to be replaced but its refresh rule is due, regenerates it in place.
         4. Compares the image hash with the last displayed image hash.
         - If the image has changed, updates the display.
         - If the image is the same, skips the refresh.
@@ -115,7 +121,13 @@ class RefreshTask:
                         if plugin_instance:
                             refresh_action = PlaylistRefresh(playlist, plugin_instance)
                             new_slot = True
+                        else:
+                            # keep the item on screen fresh according to its own refresh rule
+                            owner, current_instance = self._determine_regeneration(playlist_manager, latest_refresh, current_dt)
+                            if current_instance:
+                                refresh_action = PlaylistRefresh(owner, current_instance)
 
+                    self.last_refresh_failed = False
                     if refresh_action:
                         plugin_config = self.device_config.get_plugin(refresh_action.get_plugin_id())
                         if plugin_config is None:
@@ -145,6 +157,7 @@ class RefreshTask:
             except Exception as e:
                 logger.exception('Exception during refresh')
                 self.refresh_result["exception"] = e  # Capture exception
+                self.last_refresh_failed = True
             finally:
                 self.refresh_event.set()
 
@@ -199,14 +212,36 @@ class RefreshTask:
         return instance, instance.get_display_duration(global_interval), elapsed
 
     def _compute_sleep_time(self, playlist_manager, latest_refresh_info, current_dt):
-        """Seconds to sleep before the next scheduling check: until the current item's slot ends."""
+        """Seconds to sleep before the next scheduling check.
+
+        The earliest of: the current item's slot ending, and the current item's own refresh rule firing.
+        """
         instance, slot_seconds, elapsed = self._current_slot(playlist_manager, latest_refresh_info, current_dt)
         if instance is None or elapsed is None:
             return slot_seconds
-        remaining = slot_seconds - elapsed
+
+        remaining_slot = slot_seconds - elapsed
         # When the slot is already over but nothing advanced (e.g. no active playlist), sleep a full slot
         # rather than spinning.
-        return remaining if remaining > 0 else slot_seconds
+        candidates = [remaining_slot if remaining_slot > 0 else slot_seconds]
+
+        next_regeneration = instance.seconds_until_next_refresh(current_dt)
+        if next_regeneration is not None:
+            candidates.append(next_regeneration)
+
+        floor = FAILURE_BACKOFF_SECONDS if self.last_refresh_failed else MIN_SLEEP_SECONDS
+        return max(min(candidates), floor)
+
+    def _determine_regeneration(self, playlist_manager, latest_refresh_info, current_dt):
+        """Returns (playlist, instance) when the item on screen should be regenerated in place, else (None, None)."""
+        instance, _, _ = self._current_slot(playlist_manager, latest_refresh_info, current_dt)
+        if instance is None or not instance.should_refresh(current_dt):
+            return None, None
+        owner = playlist_manager.find_plugin_owner(instance.plugin_id, instance.name)
+        if owner is None:
+            return None, None
+        logger.info(f"Refreshing current plugin instance in place. | playlist: {owner.name} | plugin_instance: {instance.name}")
+        return owner, instance
 
     def _determine_next_plugin(self, playlist_manager, latest_refresh_info, current_dt):
         """Determines the next plugin to refresh based on the active playlist, the current item's display duration,

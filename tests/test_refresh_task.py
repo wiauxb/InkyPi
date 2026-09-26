@@ -21,10 +21,11 @@ def make_task(interval=GLOBAL_INTERVAL):
     return RefreshTask(FakeDeviceConfig(interval), display_manager=None)
 
 
-def make_manager(clock_duration=3300, weather_duration=None):
+def make_manager(clock_duration=3300, weather_duration=None, clock_refreshed_ago=None):
+    clock_refreshed = (NOW - timedelta(seconds=clock_refreshed_ago)).isoformat() if clock_refreshed_ago is not None else None
     playlist = Playlist("Default", "00:00", "24:00", [
         {"plugin_id": "clock", "name": "Clock", "plugin_settings": {}, "refresh": {"interval": 60},
-         "display_duration": clock_duration},
+         "display_duration": clock_duration, "latest_refresh_time": clock_refreshed},
         {"plugin_id": "weather", "name": "Weather", "plugin_settings": {}, "refresh": {"interval": 3600},
          "display_duration": weather_duration},
     ])
@@ -83,6 +84,41 @@ class TestComputeSleepTime:
 
     def test_overdue_slot_sleeps_full_slot(self):
         assert make_task()._compute_sleep_time(make_manager(), playlist_info("Clock", "clock", 4000), NOW) == 3300
+
+    def test_next_regeneration_shortens_sleep(self):
+        manager = make_manager(clock_refreshed_ago=20)   # 60 s interval, so due in 40 s
+        assert make_task()._compute_sleep_time(manager, playlist_info("Clock", "clock", 600), NOW) == 40
+
+    def test_slot_end_wins_over_later_regeneration(self):
+        manager = make_manager(clock_duration=30, clock_refreshed_ago=0)   # regen in 60 s, slot ends in 10 s
+        assert make_task()._compute_sleep_time(manager, playlist_info("Clock", "clock", 20), NOW) == 10
+
+    def test_overdue_regeneration_clamps_to_minimum(self):
+        manager = make_manager(clock_refreshed_ago=600)
+        assert make_task()._compute_sleep_time(manager, playlist_info("Clock", "clock", 600), NOW) == 1
+
+    def test_failure_backoff_floor(self):
+        task = make_task()
+        task.last_refresh_failed = True
+        manager = make_manager(clock_refreshed_ago=600)
+        assert task._compute_sleep_time(manager, playlist_info("Clock", "clock", 600), NOW) == 60
+
+
+class TestDetermineRegeneration:
+
+    def test_due_instance_is_regenerated_in_place(self):
+        manager = make_manager(clock_refreshed_ago=90)
+        owner, instance = make_task()._determine_regeneration(manager, playlist_info("Clock", "clock", 600), NOW)
+        assert owner.name == "Default"
+        assert instance.name == "Clock"
+
+    def test_not_due_instance_is_left_alone(self):
+        manager = make_manager(clock_refreshed_ago=10)
+        assert make_task()._determine_regeneration(manager, playlist_info("Clock", "clock", 600), NOW) == (None, None)
+
+    def test_nothing_on_screen(self):
+        info = RefreshInfo(MANUAL_REFRESH_TYPE, "clock", NOW.isoformat(), "hash")
+        assert make_task()._determine_regeneration(make_manager(), info, NOW) == (None, None)
 
 
 class TestDetermineNextPlugin:

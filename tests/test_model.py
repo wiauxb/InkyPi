@@ -26,6 +26,24 @@ class TestPluginInstance:
     def test_get_display_duration_falls_back_to_global(self, value, expected):
         assert _instance(display_duration=value).get_display_duration(3600) == expected
 
+    NOW = datetime(2026, 9, 26, 10, 0, tzinfo=timezone.utc)
+
+    def test_next_refresh_is_none_when_never_refreshed(self):
+        assert _instance().seconds_until_next_refresh(self.NOW) is None
+
+    def test_next_refresh_counts_down_interval(self):
+        instance = _instance(latest_refresh_time="2026-09-26T09:59:30+00:00")
+        assert instance.seconds_until_next_refresh(self.NOW) == 30
+
+    def test_next_refresh_overdue_interval_is_zero(self):
+        instance = _instance(latest_refresh_time="2026-09-26T09:00:00+00:00")
+        assert instance.seconds_until_next_refresh(self.NOW) == 0
+
+    @pytest.mark.parametrize("scheduled,expected", [("10:30", 1800), ("10:00", 86400), ("09:00", 82800)])
+    def test_next_refresh_scheduled_time(self, scheduled, expected):
+        instance = _instance(refresh={"scheduled": scheduled}, latest_refresh_time="2026-09-26T09:30:00+00:00")
+        assert instance.seconds_until_next_refresh(self.NOW) == expected
+
 
 class TestRefreshInfo:
 
@@ -45,6 +63,16 @@ class TestRefreshInfo:
 
 
 class TestPlaylist:
+
+    def test_set_current_plugin_moves_cursor(self):
+        playlist = Playlist("P", "00:00", "24:00", [
+            {"plugin_id": "clock", "name": "A", "plugin_settings": {}, "refresh": {"interval": 60}},
+            {"plugin_id": "clock", "name": "B", "plugin_settings": {}, "refresh": {"interval": 60}},
+            {"plugin_id": "clock", "name": "C", "plugin_settings": {}, "refresh": {"interval": 60}},
+        ])
+        assert playlist.set_current_plugin(playlist.plugins[1]) is True
+        assert playlist.get_next_plugin().name == "C"
+        assert playlist.set_current_plugin(_instance(name="missing")) is False
 
     @pytest.mark.parametrize(
         "start,end,current,expected,priority",

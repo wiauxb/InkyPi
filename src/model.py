@@ -102,6 +102,13 @@ class PlaylistManager:
                 return plugin
         return None
 
+    def find_plugin_owner(self, plugin_id, instance):
+        """Returns the playlist containing the given plugin instance, or None."""
+        for playlist in self.playlists:
+            if playlist.find_plugin(plugin_id, instance):
+                return playlist
+        return None
+
     def determine_active_playlist(self, current_datetime):
         """Determine the active playlist based on the current time."""
         current_time = current_datetime.strftime("%H:%M")  # Get current time in "HH:MM" format
@@ -241,8 +248,16 @@ class Playlist:
             self.current_plugin_index = 0
         else:
             self.current_plugin_index = (self.current_plugin_index + 1) % len(self.plugins)
-        
+
         return self.plugins[self.current_plugin_index]
+
+    def set_current_plugin(self, plugin_instance):
+        """Moves the rotation cursor to the given instance so the rotation continues from it."""
+        for index, plugin in enumerate(self.plugins):
+            if plugin.plugin_id == plugin_instance.plugin_id and plugin.name == plugin_instance.name:
+                self.current_plugin_index = index
+                return True
+        return False
 
     def get_priority(self):
         """Determine priority of a playlist, based on the time range"""
@@ -347,6 +362,32 @@ class PluginInstance:
                 return True
 
         return False
+
+    def seconds_until_next_refresh(self, current_time):
+        """Seconds until this instance's refresh rule next fires, or None when it is due now.
+
+        Mirrors the rules in should_refresh: an interval counts from the latest refresh; a scheduled
+        HH:MM fires at its next occurrence today or tomorrow.
+        """
+        latest_refresh_dt = self.get_latest_refresh_dt()
+        if not latest_refresh_dt:
+            return None
+
+        if "interval" in self.refresh:
+            interval = self.refresh.get("interval")
+            if interval:
+                remaining = (latest_refresh_dt + timedelta(seconds=interval) - current_time).total_seconds()
+                return max(remaining, 0)
+
+        if "scheduled" in self.refresh:
+            scheduled_time = datetime.strptime(self.refresh.get("scheduled"), "%H:%M").time()
+            next_fire = current_time.replace(hour=scheduled_time.hour, minute=scheduled_time.minute,
+                                             second=0, microsecond=0)
+            if next_fire <= current_time:
+                next_fire += timedelta(days=1)
+            return (next_fire - current_time).total_seconds()
+
+        return None
 
     def get_image_path(self):
         """Formats the image path for this plugin instance."""
