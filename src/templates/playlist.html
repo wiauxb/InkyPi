@@ -20,12 +20,17 @@
     <script src="{{ url_for('static', filename='scripts/sortable.min.js') }}"></script>
     <style>
         /* Drag handle for reordering and moving items */
+        /* Items on this page start at the handle, so drop the wide left padding the card has elsewhere */
+        .playlist-list .plugin-item {
+            padding-left: 10px;
+        }
+
         .drag-handle {
             cursor: grab;
             color: var(--text-secondary);
-            font-size: 18px;
+            font-size: 20px;
             line-height: 1;
-            padding: 0 4px;
+            padding: 2px 6px 2px 0;
             user-select: none;
             touch-action: none;
         }
@@ -41,11 +46,6 @@
         .sortable-drag {
             background-color: var(--modal-bg);
             box-shadow: 0 4px 12px var(--shadow-medium);
-        }
-
-        .plugin-list.drop-target {
-            outline: 2px dashed var(--accent-primary);
-            outline-offset: -2px;
         }
 
         /* Display duration lives inside the refresh-settings button: the clock icon on rest, the
@@ -451,9 +451,9 @@
                     handle: ".drag-handle",
                     draggable: ".plugin-item",
                     animation: 150,
-                    forceFallback: true,       // same pointer-based dragging on desktop and touch
-                    fallbackTolerance: 4,
-                    onMove: () => { document.querySelectorAll(".plugin-list").forEach(l => l.classList.remove("drop-target")); },
+                    // native drag on desktop; on touch, hold briefly before the item lifts so scrolling still works
+                    delay: 150,
+                    delayOnTouchOnly: true,
                     onEnd: handleDrop
                 });
             });
@@ -735,7 +735,7 @@
                         {% for plugin_instance in playlist.plugins %}
                         <div class="plugin-item" data-plugin-id="{{ plugin_instance.plugin_id }}" data-instance="{{ plugin_instance.name }}">
                             <div class="plugin-info" id="{{plugin_instance.name}}">
-                                <span class="drag-handle" title="Drag to reorder, or drop onto another playlist or event">&#x2807;</span>
+                                <span class="drag-handle" title="Drag to reorder, or drop onto another playlist or event">&#x2630;</span>
                                 <img src="{{ url_for('plugin.image', plugin_id=plugin_instance.plugin_id, filename='icon.png') }}" alt="Plugin Icon" class="plugin-icon">
                                 <span class="plugin-instance">{{ plugin_instance.name }}</span>
 
@@ -824,7 +824,7 @@
                         {% set plugin_instance = event.plugin %}
                         <div class="plugin-item" data-plugin-id="{{ plugin_instance.plugin_id }}" data-instance="{{ plugin_instance.name }}">
                             <div class="plugin-info" id="{{plugin_instance.name}}">
-                                <span class="drag-handle" title="Drag to move this screen to a playlist or another event">&#x2807;</span>
+                                <span class="drag-handle" title="Drag to move this screen to a playlist or another event">&#x2630;</span>
                                 <img src="{{ url_for('plugin.image', plugin_id=plugin_instance.plugin_id, filename='icon.png') }}" alt="Plugin Icon" class="plugin-icon">
                                 <span class="plugin-instance">{{ plugin_instance.name }}</span>
                                 {% if plugin_instance.latest_refresh_time %}
