@@ -23,6 +23,8 @@ This fork of [fatihak/InkyPi](https://github.com/fatihak/InkyPi) extends the pla
 - **Playlist windows are enforced.** One pass through a playlist's items must fit inside its time window. Adding or editing an item, changing a playlist's window, or changing the global interval is refused when it would not fit; the playlist page shows "Items X of Y". If the items take less than the window, the playlist loops until the window ends.
 - **Events.** An event shows one screen in a fixed window on a specific date or on chosen weekdays and always takes over from playlists. Create it from the Playlists page ("New Event"), then add a plugin to it from the plugin page by picking "Event: name" as the target.
 - **The item on screen stays fresh.** Its own refresh rule (every N minutes, or daily at a time) now runs while it is displayed, not just when it first appears. Refresh rate controls how often the image is regenerated; display duration controls how long it stays up. Note that e-ink panels take several seconds to rewrite and only change when the image changed, so a clock refreshed every minute rewrites every minute.
+- **Drag and drop.** Grab an item's handle to reorder it, move it to another playlist, or drop it onto an event. Dropping onto an event that already has a screen asks whether to replace that screen or swap the two. Works with mouse and touch.
+- **Duplicate.** The copy button on a playlist item creates "Name copy" right after it with the same settings, refresh rule and display duration. Uploaded images are copied too, so deleting one instance never removes the other's files.
 
 **Plugins**:
 

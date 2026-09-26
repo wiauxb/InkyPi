@@ -145,6 +145,41 @@ class TestPlaylistReorder:
         assert [p.name for p in playlist.plugins] == ["A", "Z"]
 
 
+class TestDuplicatePlugin:
+
+    def _playlist(self):
+        return Playlist("P", "00:00", "24:00", [
+            {"plugin_id": "p", "name": "A", "plugin_settings": {"city": "Brussels", "files": ["x.png"]},
+             "refresh": {"scheduled": "07:00"}, "display_duration": 900},
+            {"plugin_id": "p", "name": "B", "plugin_settings": {}, "refresh": {"interval": 60}},
+        ])
+
+    def test_copy_lands_after_original_with_same_fields(self):
+        playlist = self._playlist()
+        playlist.current_plugin_index = 1
+        copy = playlist.duplicate_plugin("p", "A", "A copy")
+        assert [p.name for p in playlist.plugins] == ["A", "A copy", "B"]
+        assert copy.settings == {"city": "Brussels", "files": ["x.png"]} and copy.settings is not playlist.plugins[0].settings
+        assert copy.refresh == {"scheduled": "07:00"} and copy.display_duration == 900
+        assert copy.latest_refresh_time is None
+        assert playlist.plugins[playlist.current_plugin_index].name == "B"
+
+    def test_settings_override_is_used(self):
+        playlist = self._playlist()
+        copy = playlist.duplicate_plugin("p", "A", "A copy", settings={"city": "Ghent"})
+        assert copy.settings == {"city": "Ghent"}
+
+    def test_missing_original(self):
+        assert self._playlist().duplicate_plugin("p", "Z", "Z copy") is None
+
+    def test_unique_name(self):
+        manager = PlaylistManager([self._playlist()])
+        assert manager.unique_instance_name("p", "A") == "A copy"
+        manager.playlists[0].duplicate_plugin("p", "A", "A copy")
+        assert manager.unique_instance_name("p", "A") == "A copy 2"
+        assert manager.unique_instance_name("other", "A") == "A copy"
+
+
 class TestMovePlugin:
 
     def _manager(self):

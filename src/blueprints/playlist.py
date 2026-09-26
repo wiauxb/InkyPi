@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta
 import os
 import logging
-from utils.app_utils import resolve_path, handle_request_files, parse_form
+from utils.app_utils import resolve_path, handle_request_files, parse_form, duplicate_uploaded_files
 
 
 logger = logging.getLogger(__name__)
@@ -65,6 +65,40 @@ def move_plugin_instance():
     # the item on screen may have moved, or the active event's screen changed
     current_app.config['REFRESH_TASK'].signal_config_change()
     return jsonify({"success": True, "message": f"Moved '{instance_name}' to '{destination}'."})
+
+@playlist_bp.route('/duplicate_plugin_instance', methods=['POST'])
+def duplicate_plugin_instance():
+    """Copies a playlist item (settings, refresh rule, display duration) right after the original."""
+    device_config = current_app.config['DEVICE_CONFIG']
+    playlist_manager = device_config.get_playlist_manager()
+
+    data = request.get_json() or {}
+    playlist_name, plugin_id, instance_name = data.get("playlist_name"), data.get("plugin_id"), data.get("plugin_instance")
+    if not all([playlist_name, plugin_id, instance_name]):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    playlist = playlist_manager.get_playlist(playlist_name)
+    if not playlist:
+        if playlist_manager.get_event(playlist_name):
+            return jsonify({"error": "An event holds a single screen. Drag it into a playlist to copy it from there."}), 400
+        return jsonify({"error": f"Playlist '{playlist_name}' not found"}), 400
+    original = playlist.find_plugin(plugin_id, instance_name)
+    if not original:
+        return jsonify({"error": f"Plugin instance '{instance_name}' not found"}), 400
+
+    # the copy must still fit the playlist window
+    global_interval = device_config.get_config("plugin_cycle_interval_seconds", default=3600)
+    window_error = playlist.validate_durations(global_interval, extra_plugin=original)
+    if window_error:
+        return jsonify({"error": window_error}), 400
+
+    new_name = playlist_manager.unique_instance_name(plugin_id, instance_name)
+    # uploaded files are owned by an instance and deleted with it, so the copy gets its own files
+    settings = duplicate_uploaded_files(original.settings)
+    playlist.duplicate_plugin(plugin_id, instance_name, new_name, settings=settings)
+
+    device_config.write_config()
+    return jsonify({"success": True, "message": f"Created '{new_name}'."})
 
 @playlist_bp.route('/create_event', methods=['POST'])
 def create_event():

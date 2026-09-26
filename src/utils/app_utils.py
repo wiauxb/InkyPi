@@ -142,6 +142,43 @@ def parse_form(request_form):
             request_dict[key] = request_form.getlist(key)
     return request_dict
 
+def duplicate_uploaded_files(settings):
+    """Returns a deep copy of plugin settings in which every uploaded file is copied to a new file.
+
+    Uploaded files live under static/images/saved and are deleted with the instance that owns them
+    (see plugin cleanup hooks), so two instances must never share one. Values that are not paths
+    under that directory are copied unchanged.
+    """
+    import copy
+    import shutil
+
+    saved_dir = os.path.realpath(resolve_path(os.path.join("static", "images", "saved")))
+
+    def copy_if_uploaded(value):
+        if not isinstance(value, str) or not value:
+            return value
+        real = os.path.realpath(value)
+        if os.path.dirname(real) != saved_dir or not os.path.isfile(real):
+            return value
+        stem, extension = os.path.splitext(os.path.basename(real))
+        counter = 1
+        while True:
+            candidate = os.path.join(saved_dir, f"{stem}_copy{counter}{extension}")
+            if not os.path.exists(candidate):
+                break
+            counter += 1
+        shutil.copy2(real, candidate)
+        logger.info(f"Duplicated uploaded file {real} -> {candidate}")
+        return candidate
+
+    duplicated = copy.deepcopy(settings or {})
+    for key, value in list(duplicated.items()):
+        if isinstance(value, list):
+            duplicated[key] = [copy_if_uploaded(v) for v in value]
+        else:
+            duplicated[key] = copy_if_uploaded(value)
+    return duplicated
+
 def handle_request_files(request_files, form_data={}):
     allowed_file_extensions = {'pdf', 'png', 'avif', 'jpg', 'jpeg', 'gif', 'webp', 'heif', 'heic'}
     file_location_map = {}

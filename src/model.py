@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import copy as copy_module
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -210,6 +211,15 @@ class PlaylistManager:
             if error:
                 return error
         return None
+
+    def unique_instance_name(self, plugin_id, base_name):
+        """Returns '<base> copy', '<base> copy 2', ... whichever is free for this plugin id."""
+        candidate = f"{base_name} copy"
+        counter = 2
+        while self.find_plugin(plugin_id, candidate):
+            candidate = f"{base_name} copy {counter}"
+            counter += 1
+        return candidate
 
     MOVE_MODES = ("move", "replace", "swap")
 
@@ -450,6 +460,23 @@ class Playlist:
         self.plugins.insert(max(index, 0), instance)
         self._restore_cursor(current, self.current_plugin_index)
         return True
+
+    def duplicate_plugin(self, plugin_id, name, new_name, settings=None):
+        """Copies an instance right after the original with the same refresh rule and display duration.
+
+        `settings` replaces the copied settings when given (used when uploaded files were duplicated).
+        Returns the new instance, or None when the original is missing.
+        """
+        index = self.index_of(plugin_id, name)
+        if index is None:
+            return None
+        original = self.plugins[index]
+        copy = PluginInstance(plugin_id, new_name,
+                              copy_module.deepcopy(original.settings) if settings is None else settings,
+                              copy_module.deepcopy(original.refresh),
+                              display_duration=original.display_duration)
+        self.insert_plugin(copy, index + 1)
+        return copy
 
     def total_item_duration(self, global_seconds):
         """Seconds needed to show every item once, using the global cycle interval for items without an override."""
