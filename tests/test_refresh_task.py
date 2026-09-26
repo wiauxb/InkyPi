@@ -157,6 +157,20 @@ class TestDetermineNextPlugin:
             {"plugin_id": "clock", "name": "Clock", "plugin_settings": {}, "refresh": {"interval": 60}}])])
         assert make_task()._determine_next_plugin(manager, RefreshInfo(None, None, None, None), NOW) == (None, None)
 
+    def test_disabling_the_current_playlist_switches_at_next_wake(self):
+        manager = make_manager()
+        manager.playlists.append(Playlist("Backup", "00:00", "24:00", [
+            {"plugin_id": "news", "name": "News", "plugin_settings": {}, "refresh": {"interval": 60}}]))
+        manager.set_enabled("Default", False)
+        target, plugin = make_task()._determine_next_plugin(manager, playlist_info("Clock", "clock", 60), NOW)
+        assert target.name == "Backup" and plugin.name == "News"
+
+    def test_everything_disabled_leaves_screen_alone(self):
+        manager = make_manager()
+        manager.set_enabled("Default", False)
+        assert make_task()._determine_next_plugin(manager, playlist_info("Clock", "clock", 60), NOW) == (None, None)
+        assert manager.active_playlist is None
+
     def test_playlist_switch_replaces_current_item_immediately(self):
         # the item on screen belongs to a playlist that is no longer active (window changed)
         manager = make_manager()

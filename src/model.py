@@ -162,6 +162,14 @@ class PlaylistManager:
     def delete_event(self, name):
         self.events = [e for e in self.events if e.name != name]
 
+    def set_enabled(self, name, enabled):
+        """Enables or disables the playlist or event with the given name. Returns False when not found."""
+        target = self.get_playlist_or_event(name)
+        if target is None:
+            return False
+        target.enabled = bool(enabled)
+        return True
+
     def determine_active_event(self, current_dt):
         """The event that should own the screen now, or None. Dated events beat weekly ones, then shorter windows."""
         active = [e for e in self.events if e.plugin and e.is_active(current_dt)]
@@ -174,10 +182,12 @@ class PlaylistManager:
         """Seconds until the next playlist or event window starts or ends, or None when there is none."""
         deltas = []
         for playlist in self.playlists:
+            if not playlist.enabled:
+                continue
             for time_str in (playlist.start_time, playlist.end_time):
                 deltas.append((next_occurrence(time_str, current_dt) - current_dt).total_seconds())
         for event in self.events:
-            if not event.plugin:
+            if not event.plugin or not event.enabled:
                 continue
             for time_str in (event.start_time, event.end_time):
                 occurrence = next_occurrence(time_str, current_dt)
@@ -363,16 +373,18 @@ class Playlist:
         current_plugin_index (int): Index of the currently active plugin in the playlist.
     """
 
-    def __init__(self, name, start_time, end_time, plugins=None, current_plugin_index=None):
+    def __init__(self, name, start_time, end_time, plugins=None, current_plugin_index=None, enabled=True):
         self.name = name
         self.start_time = start_time
         self.end_time = end_time
         self.plugins = [PluginInstance.from_dict(p) for p in (plugins or [])]
         self.current_plugin_index = current_plugin_index
+        # a disabled playlist keeps its items and window but is never scheduled
+        self.enabled = enabled
 
     def is_active(self, current_time):
-        """Check if the playlist is active at the given 'HH:MM' time."""
-        return time_in_window(self.start_time, self.end_time, current_time)
+        """Check if the playlist is enabled and active at the given 'HH:MM' time."""
+        return self.enabled and time_in_window(self.start_time, self.end_time, current_time)
 
     def add_plugin(self, plugin_data):
         """Add a new plugin instance to the playlist."""
@@ -511,7 +523,8 @@ class Playlist:
             "start_time": self.start_time,
             "end_time": self.end_time,
             "plugins": [p.to_dict() for p in self.plugins],
-            "current_plugin_index": self.current_plugin_index
+            "current_plugin_index": self.current_plugin_index,
+            "enabled": self.enabled
         }
 
     @classmethod
@@ -521,7 +534,8 @@ class Playlist:
             start_time=data["start_time"],
             end_time=data["end_time"],
             plugins=data["plugins"],
-            current_plugin_index=data.get("current_plugin_index", None)
+            current_plugin_index=data.get("current_plugin_index", None),
+            enabled=data.get("enabled", True)
         )
 
 class Event:
@@ -539,13 +553,15 @@ class Event:
         plugin (PluginInstance): The screen to show, or None while the event is empty.
     """
 
-    def __init__(self, name, start_time, end_time, date=None, days=None, plugin=None):
+    def __init__(self, name, start_time, end_time, date=None, days=None, plugin=None, enabled=True):
         self.name = name
         self.start_time = start_time
         self.end_time = end_time
         self.date = date or None
         self.days = sorted(set(days)) if days else None
         self.plugin = PluginInstance.from_dict(plugin) if plugin else None
+        # a disabled event keeps its screen and window but is never scheduled
+        self.enabled = enabled
 
     @property
     def plugins(self):
@@ -564,8 +580,8 @@ class Event:
         return True
 
     def is_active(self, current_dt):
-        """True when the event should own the screen at the given datetime."""
-        if not self.applies_on(current_dt.date()):
+        """True when the event is enabled and should own the screen at the given datetime."""
+        if not self.enabled or not self.applies_on(current_dt.date()):
             return False
         return time_in_window(self.start_time, self.end_time, current_dt.strftime("%H:%M"))
 
@@ -617,6 +633,7 @@ class Event:
             "date": self.date,
             "days": self.days,
             "plugin": self.plugin.to_dict() if self.plugin else None,
+            "enabled": self.enabled,
         }
 
     @classmethod
@@ -628,6 +645,7 @@ class Event:
             date=data.get("date"),
             days=data.get("days"),
             plugin=data.get("plugin"),
+            enabled=data.get("enabled", True),
         )
 
 class PluginInstance:

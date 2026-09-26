@@ -145,6 +145,51 @@ class TestPlaylistReorder:
         assert [p.name for p in playlist.plugins] == ["A", "Z"]
 
 
+class TestEnabled:
+
+    def test_playlist_default_and_round_trip(self):
+        playlist = Playlist.from_dict({"name": "P", "start_time": "00:00", "end_time": "24:00", "plugins": []})
+        assert playlist.enabled is True                       # legacy config without the key
+        playlist.enabled = False
+        assert Playlist.from_dict(playlist.to_dict()).enabled is False
+
+    def test_disabled_playlist_is_never_active(self):
+        playlist = Playlist("P", "00:00", "24:00", enabled=False)
+        assert playlist.is_active("12:00") is False
+        playlist.enabled = True
+        assert playlist.is_active("12:00") is True
+
+    def test_disabled_playlist_is_not_chosen(self):
+        manager = PlaylistManager([Playlist("All", "00:00", "24:00", _items("A")),
+                                   Playlist("Short", "09:00", "11:00", _items("B"))])
+        assert manager.determine_active_playlist(NOW).name == "Short"   # shortest window wins
+        manager.set_enabled("Short", False)
+        assert manager.determine_active_playlist(NOW).name == "All"
+        manager.set_enabled("All", False)
+        assert manager.determine_active_playlist(NOW) is None
+
+    def test_disabled_event_is_ignored(self):
+        event = Event("E", "10:00", "10:05", date="2026-09-26", plugin=EVENT_PLUGIN)
+        assert event.is_active(NOW) is True
+        event.enabled = False
+        assert event.is_active(NOW) is False
+        assert Event.from_dict(event.to_dict()).enabled is False
+        assert Event.from_dict({"name": "E", "start_time": "10:00", "end_time": "11:00"}).enabled is True
+
+    def test_disabled_windows_do_not_bound_the_sleep(self):
+        manager = PlaylistManager([Playlist("All", "00:00", "24:00", _items("A"))])
+        manager.add_event("E", "10:00", "10:05", date="2026-09-26")
+        manager.get_event("E").add_plugin(EVENT_PLUGIN)
+        assert manager.seconds_until_next_boundary(NOW) == 300
+        manager.set_enabled("E", False)
+        assert manager.seconds_until_next_boundary(NOW) == 14 * 3600
+        manager.set_enabled("All", False)
+        assert manager.seconds_until_next_boundary(NOW) is None
+
+    def test_set_enabled_unknown_name(self):
+        assert PlaylistManager([]).set_enabled("Nope", False) is False
+
+
 class TestDuplicatePlugin:
 
     def _playlist(self):

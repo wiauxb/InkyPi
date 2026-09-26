@@ -171,6 +171,34 @@
             font-weight: 600;
         }
 
+        /* Enable / disable a playlist or event without deleting it */
+        .enable-toggle {
+            margin-left: 12px;
+            flex-shrink: 0;
+        }
+
+        .enable-toggle .toggle-container {
+            width: 40px;
+            height: 20px;
+            vertical-align: middle;
+        }
+
+        .enable-toggle .toggle-label::before {
+            height: 14px;
+            width: 14px;
+        }
+
+        .enable-toggle .toggle-checkbox:checked + .toggle-label::before {
+            transform: translateX(20px);
+        }
+
+        .playlist-item.disabled .plugin-list,
+        .playlist-item.disabled .playlist-title,
+        .playlist-item.disabled .playlist-usage,
+        .playlist-item.disabled .event-when {
+            opacity: 0.45;
+        }
+
         /* Events */
         .section-title {
             display: flex;
@@ -235,6 +263,27 @@
                     location.reload();
                 } else {
                     showResponseModal('failure', `Error!  ${result.error}`);
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('An error occurred while processing your request.');
+            }
+        }
+
+        async function setEnabled(name, enabled) {
+            try {
+                const response = await fetch("{{ url_for('playlist.set_enabled', name='') }}" + encodeURIComponent(name), {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled })
+                });
+                const result = await response.json();
+                if (response.ok) {
+                    sessionStorage.setItem("storedMessage", JSON.stringify({ type: "success", text: `Success! ${result.message}` }));
+                    location.reload();
+                } else {
+                    showResponseModal('failure', `Error!  ${result.error}`);
+                    location.reload();
                 }
             } catch (error) {
                 console.error('Error:', error);
@@ -718,9 +767,15 @@
         <!-- Playlists Container -->
         <div class="playlist-list">
             {% for playlist in playlist_config.playlists %}
-            <div class="playlist-item {% if playlist.name == playlist_config.active_playlist %}active{% endif %}">
+            <div class="playlist-item {% if playlist.name == playlist_config.active_playlist %}active{% endif %} {% if not playlist.enabled %}disabled{% endif %}">
                     <div class="playlist-header">
                         <span class="playlist-title">{{ playlist.name }}</span>
+                        <span class="enable-toggle" title="{% if playlist.enabled %}Enabled. Switch off to skip this playlist without deleting it.{% else %}Disabled. Switch on to schedule this playlist again.{% endif %}">
+                            <span class="toggle-container">
+                                <input type="checkbox" class="toggle-checkbox" id="enable-playlist-{{ loop.index }}" {% if playlist.enabled %}checked{% endif %} onchange='setEnabled({{ playlist.name | tojson }}, this.checked)'>
+                                <label for="enable-playlist-{{ loop.index }}" class="toggle-label"></label>
+                            </span>
+                        </span>
                         {% set usage = playlist_usage.get(playlist.name) %}
                         {% if usage and playlist.plugins %}
                         <span class="playlist-usage {% if usage.items_seconds > usage.window_seconds %}over{% endif %}"
@@ -808,9 +863,15 @@
         </div>
         <div class="playlist-list">
             {% for event in events %}
-            <div class="playlist-item {% if event.name == playlist_config.active_playlist %}active{% endif %}">
+            <div class="playlist-item {% if event.name == playlist_config.active_playlist %}active{% endif %} {% if not event.enabled %}disabled{% endif %}">
                     <div class="playlist-header">
                         <span class="playlist-title">{{ event.name }}</span>
+                        <span class="enable-toggle" title="{% if event.enabled %}Enabled. Switch off to skip this event without deleting it.{% else %}Disabled. Switch on to schedule this event again.{% endif %}">
+                            <span class="toggle-container">
+                                <input type="checkbox" class="toggle-checkbox" id="enable-event-{{ loop.index }}" {% if event.enabled %}checked{% endif %} onchange='setEnabled({{ event.name | tojson }}, this.checked)'>
+                                <label for="enable-event-{{ loop.index }}" class="toggle-label"></label>
+                            </span>
+                        </span>
                         <span class="event-when">
                             {% if event.date %}{{ event.date }}{% elif event.days %}{% for d in event.days %}{{ weekday_names[d] }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}Every day{% endif %}
                             &middot; {{ event.start_time }}-{{ event.end_time }}

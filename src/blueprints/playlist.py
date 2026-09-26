@@ -37,6 +37,24 @@ def _parse_event_payload(data):
         return None, "End time must be after start time"
     return {"name": name, "start_time": start_time, "end_time": end_time, "date": date, "days": days}, None
 
+@playlist_bp.route('/set_enabled/<string:name>', methods=['PUT'])
+def set_enabled(name):
+    """Enables or disables a playlist or event without deleting it."""
+    device_config = current_app.config['DEVICE_CONFIG']
+    playlist_manager = device_config.get_playlist_manager()
+
+    data = request.get_json() or {}
+    if "enabled" not in data:
+        return jsonify({"error": "'enabled' is required"}), 400
+    enabled = bool(data.get("enabled"))
+    if not playlist_manager.set_enabled(name, enabled):
+        return jsonify({"error": f"Playlist or event '{name}' does not exist"}), 400
+
+    device_config.write_config()
+    # the item on screen may belong to what was just disabled, or a newly enabled window may apply now
+    current_app.config['REFRESH_TASK'].signal_config_change()
+    return jsonify({"success": True, "message": f"{'Enabled' if enabled else 'Disabled'} '{name}'."})
+
 @playlist_bp.route('/move_plugin_instance', methods=['POST'])
 def move_plugin_instance():
     """Reorders an item, or moves it to another playlist or event (drag and drop)."""
