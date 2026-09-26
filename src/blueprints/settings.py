@@ -51,6 +51,10 @@ def save_settings():
         plugin_cycle_interval_seconds = calculate_seconds(int(interval), unit)
         if plugin_cycle_interval_seconds > 86400 or plugin_cycle_interval_seconds <= 0:
             return jsonify({"error": "Plugin cycle interval must be less than 24 hours"}), 400
+        # items without their own display duration use this interval, so every playlist must still fit
+        window_error = device_config.get_playlist_manager().validate_all_durations(plugin_cycle_interval_seconds)
+        if window_error:
+            return jsonify({"error": window_error}), 400
 
         settings = {
             "name": form_data.get("deviceName"),

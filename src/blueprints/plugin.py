@@ -195,7 +195,16 @@ def update_plugin_instance(instance_name):
                 display_duration, duration_error = parse_display_duration(refresh_settings)
                 if duration_error:
                     return jsonify({"error": duration_error}), 400
+                previous_duration = plugin_instance.display_duration
                 plugin_instance.display_duration = display_duration
+                # the owning playlist must still fit one pass through its items
+                owner = playlist_manager.find_plugin_owner(plugin_id, instance_name)
+                if owner:
+                    global_interval = device_config.get_config("plugin_cycle_interval_seconds", default=3600)
+                    window_error = owner.validate_durations(global_interval)
+                    if window_error:
+                        plugin_instance.display_duration = previous_duration
+                        return jsonify({"error": window_error}), 400
 
         # Only update plugin settings if there's actual data (not just refresh settings)
         plugin_settings = form_data

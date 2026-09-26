@@ -109,6 +109,14 @@ class PlaylistManager:
                 return playlist
         return None
 
+    def validate_all_durations(self, global_seconds):
+        """Returns the first playlist error for the given global cycle interval, or None when every playlist fits."""
+        for playlist in self.playlists:
+            error = playlist.validate_durations(global_seconds)
+            if error:
+                return error
+        return None
+
     def determine_active_playlist(self, current_datetime):
         """Determine the active playlist based on the current time."""
         current_time = current_datetime.strftime("%H:%M")  # Get current time in "HH:MM" format
@@ -258,6 +266,25 @@ class Playlist:
                 self.current_plugin_index = index
                 return True
         return False
+
+    def total_item_duration(self, global_seconds):
+        """Seconds needed to show every item once, using the global cycle interval for items without an override."""
+        return sum(p.get_display_duration(global_seconds) for p in self.plugins)
+
+    def validate_durations(self, global_seconds, extra_plugin=None):
+        """Checks that one pass through the items fits in the playlist's time window.
+
+        Returns an error message, or None when the items fit. `extra_plugin` lets callers validate an item
+        before it is added.
+        """
+        total = self.total_item_duration(global_seconds)
+        if extra_plugin is not None:
+            total += extra_plugin.get_display_duration(global_seconds)
+        window = self.get_time_range_minutes() * 60
+        if total > window:
+            return (f"Playlist '{self.name}' runs {self.start_time}-{self.end_time} ({window // 60} min) but its items "
+                    f"need {total // 60} min to show once. Shorten some display durations or widen the playlist.")
+        return None
 
     def get_priority(self):
         """Determine priority of a playlist, based on the time range"""

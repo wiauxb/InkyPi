@@ -74,6 +74,46 @@ class TestPlaylist:
         assert playlist.get_next_plugin().name == "C"
         assert playlist.set_current_plugin(_instance(name="missing")) is False
 
+    def _window_playlist(self, start, end, durations):
+        return Playlist("Morning", start, end, [
+            {"plugin_id": "p", "name": f"Item{i}", "plugin_settings": {}, "refresh": {"interval": 60},
+             "display_duration": d}
+            for i, d in enumerate(durations)])
+
+    def test_total_item_duration_uses_global_for_unset_items(self):
+        playlist = self._window_playlist("09:00", "10:00", [600, None, 300])
+        assert playlist.total_item_duration(1200) == 2100
+
+    def test_items_that_fit_pass_validation(self):
+        playlist = self._window_playlist("09:00", "10:00", [1800, 1800])
+        assert playlist.validate_durations(3600) is None
+
+    def test_items_that_overflow_fail_validation(self):
+        playlist = self._window_playlist("09:00", "10:00", [1800, 1801])
+        error = playlist.validate_durations(3600)
+        assert "Morning" in error and "60 min" in error
+
+    def test_global_interval_counts_for_unset_items(self):
+        playlist = self._window_playlist("09:00", "10:00", [None, None])
+        assert playlist.validate_durations(1800) is None
+        assert playlist.validate_durations(1801) is not None
+
+    def test_extra_plugin_is_included_before_adding(self):
+        playlist = self._window_playlist("09:00", "10:00", [3000])
+        assert playlist.validate_durations(3600, extra_plugin=_instance(display_duration=600)) is None
+        assert playlist.validate_durations(3600, extra_plugin=_instance(display_duration=601)) is not None
+
+    def test_wrapping_window_is_measured_correctly(self):
+        playlist = self._window_playlist("23:00", "01:00", [3600, 3600])
+        assert playlist.validate_durations(3600) is None
+
+    def test_manager_validates_every_playlist(self):
+        from src.model import PlaylistManager
+        manager = PlaylistManager([self._window_playlist("09:00", "10:00", [None]),
+                                   self._window_playlist("00:00", "24:00", [None, None])])
+        assert manager.validate_all_durations(3600) is None
+        assert "Morning" in manager.validate_all_durations(3601)
+
     @pytest.mark.parametrize(
         "start,end,current,expected,priority",
         [

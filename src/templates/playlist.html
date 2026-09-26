@@ -93,6 +93,20 @@
             color: var(--text-secondary);
             font-size: 14px;
         }
+
+        /* Playlist window usage: how much of the time window one pass through the items needs */
+        .playlist-usage {
+            margin-left: auto;
+            margin-right: 8px;
+            font-size: 13px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+
+        .playlist-usage.over {
+            color: #d9534f;
+            font-weight: 600;
+        }
     </style>
     <script>
         async function deletePluginInstance(playlistName, pluginId, pluginInstance) {
@@ -404,6 +418,13 @@
             <div class="playlist-item {% if playlist.name == playlist_config.active_playlist %}active{% endif %}">
                     <div class="playlist-header">
                         <span class="playlist-title">{{ playlist.name }}</span>
+                        {% set usage = playlist_usage.get(playlist.name) %}
+                        {% if usage and playlist.plugins %}
+                        <span class="playlist-usage {% if usage.items_seconds > usage.window_seconds %}over{% endif %}"
+                              title="Time needed to show every item once, out of the playlist window {{ playlist.start_time }}-{{ playlist.end_time }}. The playlist loops until the window ends.">
+                            Items {{ usage.items_seconds | format_duration }} of {{ usage.window_seconds | format_duration }}
+                        </span>
+                        {% endif %}
                         <button class="edit-button" onclick="openEditModal('{{ playlist.name }}', '{{ playlist.start_time }}','{{ playlist.end_time }}')"><img src="{{ url_for('static', filename='icons/settings.png') }}" alt="edit playlist" class="action-icon"></button>
                     </div>
                     <!-- Plugin List -->

@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app, render_template
 from utils.time_utils import calculate_seconds, parse_display_duration
+from model import PluginInstance, Playlist
 import json
 from datetime import datetime, timedelta
 import os
@@ -55,6 +56,15 @@ def add_plugin():
         if duration_error:
             return jsonify({"error": duration_error}), 400
 
+        target_playlist = playlist_manager.get_playlist(playlist)
+        if not target_playlist:
+            return jsonify({"error": f"Playlist '{playlist}' not found"}), 400
+        global_interval = device_config.get_config("plugin_cycle_interval_seconds", default=3600)
+        candidate = PluginInstance("candidate", "candidate", {}, refresh_config, display_duration=display_duration)
+        window_error = target_playlist.validate_durations(global_interval, extra_plugin=candidate)
+        if window_error:
+            return jsonify({"error": window_error}), 400
+
         plugin_settings.update(handle_request_files(request.files))
         plugin_dict = {
             "plugin_id": plugin_id,
@@ -79,12 +89,20 @@ def playlists():
     refresh_info = device_config.get_refresh_info()
     plugins_list = device_config.get_plugins()
 
+    global_interval = device_config.get_config("plugin_cycle_interval_seconds", default=3600)
+    # per playlist: seconds needed for one pass through its items, and the window it has to do it in
+    playlist_usage = {
+        p.name: {"items_seconds": p.total_item_duration(global_interval), "window_seconds": p.get_time_range_minutes() * 60}
+        for p in playlist_manager.playlists
+    }
+
     return render_template(
         'playlist.html',
         playlist_config=playlist_manager.to_dict(),
         refresh_info=refresh_info.to_dict(),
         plugins={p["id"]: p for p in plugins_list},
-        plugin_cycle_interval_seconds=device_config.get_config("plugin_cycle_interval_seconds", default=3600)
+        plugin_cycle_interval_seconds=global_interval,
+        playlist_usage=playlist_usage
     )
 
 @playlist_bp.route('/create_playlist', methods=['POST'])
@@ -138,9 +156,16 @@ def update_playlist(playlist_name):
     if not playlist:
         return jsonify({"error": f"Playlist '{playlist_name}' does not exist"}), 400
 
+    # the new window must still fit one pass through the items
+    global_interval = device_config.get_config("plugin_cycle_interval_seconds", default=3600)
+    candidate = Playlist(new_name, start_time, end_time, [p.to_dict() for p in playlist.plugins])
+    window_error = candidate.validate_durations(global_interval)
+    if window_error:
+        return jsonify({"error": window_error}), 400
+
     result = playlist_manager.update_playlist(playlist_name, new_name, start_time, end_time)
     if not result:
-        return jsonify({"error": "Failed to delete playlist"}), 500
+        return jsonify({"error": "Failed to update playlist"}), 500
     device_config.write_config()
 
     return jsonify({"success": True, "message": f"Updated playlist '{playlist_name}'!"})
