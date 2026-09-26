@@ -449,6 +449,13 @@
                         {% for playlist_name in playlists %}
                         <option value="{{playlist_name}}">{{playlist_name}}</option>
                         {% endfor %}
+                        {% if events %}
+                        <optgroup label="Events (single screen, shown for the whole window)">
+                            {% for event_name in events %}
+                            <option value="event:{{event_name}}">Event: {{event_name}}</option>
+                            {% endfor %}
+                        </optgroup>
+                        {% endif %}
                     </select>
                 </div>
                 <div class="form-group">

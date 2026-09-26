@@ -1,7 +1,118 @@
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from src.model import Playlist, PluginInstance, RefreshInfo
+from src.model import Playlist, PluginInstance, RefreshInfo, Event, PlaylistManager, next_occurrence
+
+NOW = datetime(2026, 9, 26, 10, 0, tzinfo=timezone.utc)   # a Saturday
+EVENT_PLUGIN = {"plugin_id": "party", "name": "Party", "plugin_settings": {}, "refresh": {"interval": 3600}}
+
+
+class TestEvent:
+
+    def test_round_trip(self):
+        event = Event("Birthday", "10:00", "10:05", date="2026-09-26", plugin=EVENT_PLUGIN)
+        data = event.to_dict()
+        again = Event.from_dict(data)
+        assert again.name == "Birthday" and again.date == "2026-09-26" and again.days is None
+        assert again.plugin.name == "Party"
+        assert Event.from_dict({"name": "E", "start_time": "10:00", "end_time": "11:00"}).plugin is None
+
+    @pytest.mark.parametrize("when,expected", [
+        (datetime(2026, 9, 26, 10, 0, tzinfo=timezone.utc), True),
+        (datetime(2026, 9, 26, 10, 4, tzinfo=timezone.utc), True),
+        (datetime(2026, 9, 26, 10, 5, tzinfo=timezone.utc), False),
+        (datetime(2026, 9, 27, 10, 2, tzinfo=timezone.utc), False),
+    ])
+    def test_dated_event_is_active_only_in_its_window_on_its_date(self, when, expected):
+        event = Event("Birthday", "10:00", "10:05", date="2026-09-26", plugin=EVENT_PLUGIN)
+        assert event.is_active(when) is expected
+
+    def test_weekday_event(self):
+        event = Event("Weekend", "10:00", "11:00", days=[5, 6], plugin=EVENT_PLUGIN)
+        assert event.is_active(NOW) is True                                # Saturday
+        assert event.is_active(NOW + timedelta(days=2)) is False           # Monday
+        assert Event("Daily", "10:00", "11:00", plugin=EVENT_PLUGIN).is_active(NOW + timedelta(days=2)) is True
+
+    def test_expired(self):
+        assert Event("Old", "10:00", "11:00", date="2026-09-25").is_expired(NOW) is True
+        assert Event("Today", "10:00", "11:00", date="2026-09-26").is_expired(NOW) is False
+        assert Event("Weekly", "10:00", "11:00", days=[0]).is_expired(NOW) is False
+
+    def test_priority_prefers_dated_then_shorter(self):
+        dated = Event("D", "09:00", "18:00", date="2026-09-26")
+        weekly_short = Event("W", "10:00", "10:30", days=[5])
+        daily_shorter = Event("A", "10:00", "10:10")
+        assert sorted([daily_shorter, weekly_short, dated], key=lambda e: e.get_priority()) == [dated, daily_shorter, weekly_short]
+
+    def test_single_plugin_slot(self):
+        event = Event("E", "10:00", "11:00")
+        event.add_plugin(EVENT_PLUGIN)
+        assert event.find_plugin("party", "Party") is not None
+        event.add_plugin({**EVENT_PLUGIN, "name": "Other"})
+        assert event.find_plugin("party", "Party") is None and event.plugins[0].name == "Other"
+        assert event.delete_plugin("party", "Other") is True and event.plugin is None
+
+
+class TestPlaylistManagerEvents:
+
+    def _manager(self):
+        manager = PlaylistManager([Playlist("Default", "00:00", "24:00", [
+            {"plugin_id": "clock", "name": "Clock", "plugin_settings": {}, "refresh": {"interval": 60}}])])
+        manager.add_event("Birthday", "10:00", "10:05", date="2026-09-26")
+        manager.get_event("Birthday").add_plugin(EVENT_PLUGIN)
+        return manager
+
+    def test_legacy_config_without_events_loads(self):
+        manager = PlaylistManager.from_dict({"playlists": [], "active_playlist": None})
+        assert manager.events == []
+        assert "events" in manager.to_dict()
+
+    def test_round_trip_keeps_events(self):
+        manager = PlaylistManager.from_dict(self._manager().to_dict())
+        assert manager.get_event("Birthday").plugin.name == "Party"
+
+    def test_find_plugin_searches_events(self):
+        manager = self._manager()
+        assert manager.find_plugin("party", "Party").name == "Party"
+        assert manager.find_plugin_owner("party", "Party").name == "Birthday"
+        assert manager.find_plugin_owner("clock", "Clock").name == "Default"
+
+    def test_names_are_unique_across_playlists_and_events(self):
+        manager = self._manager()
+        assert manager.add_event("Default", "10:00", "11:00") is False
+        assert manager.add_event("Birthday", "10:00", "11:00") is False
+        assert manager.update_event("Birthday", "Default", "10:00", "11:00") is False
+        assert manager.update_event("Birthday", "Party time", "10:00", "11:00", days=[0, 0, 2]) is True
+        assert manager.get_event("Party time").days == [0, 2]
+
+    def test_determine_active_event(self):
+        manager = self._manager()
+        assert manager.determine_active_event(NOW).name == "Birthday"
+        assert manager.determine_active_event(NOW + timedelta(minutes=5)) is None
+        manager.get_event("Birthday").plugin = None
+        assert manager.determine_active_event(NOW) is None
+
+    def test_seconds_until_next_boundary(self):
+        manager = self._manager()
+        # Default playlist boundaries are at 00:00 / 24:00 (14 h away); the event ends in 5 min
+        assert manager.seconds_until_next_boundary(NOW) == 300
+        # after the event, the next boundary is midnight
+        assert manager.seconds_until_next_boundary(NOW + timedelta(minutes=5)) == 13 * 3600 + 55 * 60
+        # an event on another date contributes nothing today
+        manager.get_event("Birthday").date = "2026-09-28"
+        assert manager.seconds_until_next_boundary(NOW) == 14 * 3600
+        # a weekday event only counts on its days (Saturday = 5)
+        manager.get_event("Birthday").date = None
+        manager.get_event("Birthday").days = [5]
+        assert manager.seconds_until_next_boundary(NOW) == 300
+        manager.get_event("Birthday").days = [0]
+        assert manager.seconds_until_next_boundary(NOW) == 14 * 3600
+        assert PlaylistManager([]).seconds_until_next_boundary(NOW) is None
+
+    def test_next_occurrence(self):
+        assert next_occurrence("10:30", NOW) == NOW + timedelta(minutes=30)
+        assert next_occurrence("10:00", NOW) == NOW + timedelta(days=1)
+        assert next_occurrence("24:00", NOW) == NOW + timedelta(hours=14)
 
 
 def _instance(**overrides):

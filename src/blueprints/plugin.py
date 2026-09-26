@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify, current_app, render_template, sen
 from plugins.plugin_registry import get_plugin_instance
 from utils.app_utils import resolve_path, handle_request_files, parse_form
 from refresh_task import ManualRefresh, PlaylistRefresh
+from model import Playlist
 import json
 import os
 import logging
@@ -57,6 +58,7 @@ def plugin_page(plugin_id):
                 template_params["display_duration"] = plugin_instance.display_duration
 
             template_params["playlists"] = playlist_manager.get_playlist_names()
+            template_params["events"] = playlist_manager.get_event_names()
         except Exception as e:
             logger.exception("EXCEPTION CAUGHT: " + str(e))
             return jsonify({"error": f"An error occurred: {str(e)}"}), 500
@@ -98,8 +100,8 @@ def plugin_instance_image(playlist_name, plugin_id, instance_name):
     device_config = current_app.config['DEVICE_CONFIG']
     playlist_manager = device_config.get_playlist_manager()
 
-    # Find the plugin instance
-    playlist = playlist_manager.get_playlist(playlist_name)
+    # Find the plugin instance (the owner may be a playlist or an event)
+    playlist = playlist_manager.get_playlist_or_event(playlist_name)
     if not playlist:
         return "Playlist not found", 404
 
@@ -130,7 +132,7 @@ def delete_plugin_instance():
     plugin_instance = data.get("plugin_instance")
 
     try:
-        playlist = playlist_manager.get_playlist(playlist_name)
+        playlist = playlist_manager.get_playlist_or_event(playlist_name)
         if not playlist:
             return jsonify({"success": False, "message": "Playlist not found"}), 400
 
@@ -232,7 +234,7 @@ def display_plugin_instance():
     plugin_instance_name = data.get("plugin_instance")
 
     try:
-        playlist = playlist_manager.get_playlist(playlist_name)
+        playlist = playlist_manager.get_playlist_or_event(playlist_name)
         if not playlist:
             return jsonify({"success": False, "message": f"Playlist {playlist_name} not found"}), 400
 
@@ -241,7 +243,8 @@ def display_plugin_instance():
             return jsonify({"success": False, "message": f"Plugin instance '{plugin_instance_name}' not found"}), 400
 
         # continue the rotation from the item being shown, and give it a full display slot
-        playlist.set_current_plugin(plugin_instance)
+        if isinstance(playlist, Playlist):
+            playlist.set_current_plugin(plugin_instance)
         refresh_task.manual_update(PlaylistRefresh(playlist, plugin_instance, force=True))
     except Exception as e:
         return jsonify({"error": f"An error occurred: {str(e)}"}), 500

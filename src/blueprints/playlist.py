@@ -11,6 +11,85 @@ from utils.app_utils import resolve_path, handle_request_files, parse_form
 logger = logging.getLogger(__name__)
 playlist_bp = Blueprint("playlist", __name__)
 
+EVENT_TARGET_PREFIX = "event:"
+
+def _parse_event_payload(data):
+    """Validates the JSON body of the event routes. Returns (fields, error)."""
+    name = (data.get("name") or "").strip()
+    start_time, end_time = data.get("start_time"), data.get("end_time")
+    date = (data.get("date") or "").strip() or None
+    days = data.get("days")
+    if not name:
+        return None, "Event name is required"
+    if not start_time or not end_time:
+        return None, "Start time and End time are required"
+    if date:
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            return None, "Date must be YYYY-MM-DD"
+        days = None
+    elif days is not None:
+        if not isinstance(days, list) or any(not isinstance(d, int) or d < 0 or d > 6 for d in days):
+            return None, "Days must be a list of weekday numbers 0-6"
+        days = days or None
+    if Playlist(name, start_time, end_time).get_time_range_minutes() <= 0:
+        return None, "End time must be after start time"
+    return {"name": name, "start_time": start_time, "end_time": end_time, "date": date, "days": days}, None
+
+@playlist_bp.route('/create_event', methods=['POST'])
+def create_event():
+    device_config = current_app.config['DEVICE_CONFIG']
+    playlist_manager = device_config.get_playlist_manager()
+
+    fields, error = _parse_event_payload(request.get_json() or {})
+    if error:
+        return jsonify({"error": error}), 400
+    if playlist_manager.get_playlist_or_event(fields["name"]):
+        return jsonify({"error": f"A playlist or event named '{fields['name']}' already exists"}), 400
+
+    playlist_manager.add_event(**fields)
+    device_config.write_config()
+    current_app.config['REFRESH_TASK'].signal_config_change()
+    return jsonify({"success": True, "message": "Created new Event!"})
+
+@playlist_bp.route('/update_event/<string:event_name>', methods=['PUT'])
+def update_event(event_name):
+    device_config = current_app.config['DEVICE_CONFIG']
+    playlist_manager = device_config.get_playlist_manager()
+
+    if not playlist_manager.get_event(event_name):
+        return jsonify({"error": f"Event '{event_name}' does not exist"}), 400
+    fields, error = _parse_event_payload(request.get_json() or {})
+    if error:
+        return jsonify({"error": error}), 400
+    new_name = fields.pop("name")
+    if new_name != event_name and playlist_manager.get_playlist_or_event(new_name):
+        return jsonify({"error": f"A playlist or event named '{new_name}' already exists"}), 400
+
+    playlist_manager.update_event(event_name, new_name, **fields)
+    device_config.write_config()
+    current_app.config['REFRESH_TASK'].signal_config_change()
+    return jsonify({"success": True, "message": f"Updated event '{new_name}'!"})
+
+@playlist_bp.route('/delete_event/<string:event_name>', methods=['DELETE'])
+def delete_event(event_name):
+    device_config = current_app.config['DEVICE_CONFIG']
+    playlist_manager = device_config.get_playlist_manager()
+
+    event = playlist_manager.get_event(event_name)
+    if not event:
+        return jsonify({"error": f"Event '{event_name}' does not exist"}), 400
+
+    if event.plugin:
+        from blueprints.plugin import _delete_plugin_instance_images
+        _delete_plugin_instance_images(device_config, event.plugin)
+
+    playlist_manager.delete_event(event_name)
+    device_config.write_config()
+    current_app.config['REFRESH_TASK'].signal_config_change()
+    return jsonify({"success": True, "message": f"Deleted event '{event_name}'!"})
+
 @playlist_bp.route('/add_plugin', methods=['POST'])
 def add_plugin():
     device_config = current_app.config['DEVICE_CONFIG']
@@ -38,6 +117,13 @@ def add_plugin():
         if existing:
             return jsonify({"error": f"Plugin instance '{instance_name}' already exists"}), 400
 
+        # targets are playlist names, or "event:<name>" for an event's single screen
+        target_event = None
+        if playlist.startswith(EVENT_TARGET_PREFIX):
+            target_event = playlist_manager.get_event(playlist[len(EVENT_TARGET_PREFIX):])
+            if not target_event:
+                return jsonify({"error": f"Event '{playlist[len(EVENT_TARGET_PREFIX):]}' not found"}), 400
+
         if refresh_type == "interval":
             unit, interval = refresh_settings.get('unit'), refresh_settings.get("interval")
             if not unit or unit not in ["minute", "hour", "day"]:
@@ -56,14 +142,15 @@ def add_plugin():
         if duration_error:
             return jsonify({"error": duration_error}), 400
 
-        target_playlist = playlist_manager.get_playlist(playlist)
-        if not target_playlist:
-            return jsonify({"error": f"Playlist '{playlist}' not found"}), 400
-        global_interval = device_config.get_config("plugin_cycle_interval_seconds", default=3600)
-        candidate = PluginInstance("candidate", "candidate", {}, refresh_config, display_duration=display_duration)
-        window_error = target_playlist.validate_durations(global_interval, extra_plugin=candidate)
-        if window_error:
-            return jsonify({"error": window_error}), 400
+        if target_event is None:
+            target_playlist = playlist_manager.get_playlist(playlist)
+            if not target_playlist:
+                return jsonify({"error": f"Playlist '{playlist}' not found"}), 400
+            global_interval = device_config.get_config("plugin_cycle_interval_seconds", default=3600)
+            candidate = PluginInstance("candidate", "candidate", {}, refresh_config, display_duration=display_duration)
+            window_error = target_playlist.validate_durations(global_interval, extra_plugin=candidate)
+            if window_error:
+                return jsonify({"error": window_error}), 400
 
         plugin_settings.update(handle_request_files(request.files))
         plugin_dict = {
@@ -71,13 +158,22 @@ def add_plugin():
             "refresh": refresh_config,
             "plugin_settings": plugin_settings,
             "name": instance_name,
-            "display_duration": display_duration
+            # an event's screen is shown for its whole window, so it carries no display duration
+            "display_duration": None if target_event else display_duration
         }
-        result = playlist_manager.add_plugin_to_playlist(playlist, plugin_dict)
+        if target_event is not None:
+            if target_event.plugin:
+                from blueprints.plugin import _delete_plugin_instance_images
+                _delete_plugin_instance_images(device_config, target_event.plugin)
+            result = target_event.add_plugin(plugin_dict)
+        else:
+            result = playlist_manager.add_plugin_to_playlist(playlist, plugin_dict)
         if not result:
             return jsonify({"error": "Failed to add to playlist"}), 500
 
         device_config.write_config()
+        # the new screen may belong to the active event, or change the next boundary
+        refresh_task.signal_config_change()
     except Exception as e:
         return jsonify({"error": f"An error occurred: {str(e)}"}), 500
     return jsonify({"success": True, "message": "Scheduled refresh configured."})
@@ -96,13 +192,22 @@ def playlists():
         for p in playlist_manager.playlists
     }
 
+    now = datetime.now()
+    events = []
+    for event in playlist_manager.events:
+        event_dict = event.to_dict()
+        event_dict["expired"] = event.is_expired(now)
+        events.append(event_dict)
+
     return render_template(
         'playlist.html',
         playlist_config=playlist_manager.to_dict(),
         refresh_info=refresh_info.to_dict(),
         plugins={p["id"]: p for p in plugins_list},
         plugin_cycle_interval_seconds=global_interval,
-        playlist_usage=playlist_usage
+        playlist_usage=playlist_usage,
+        events=events,
+        weekday_names=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     )
 
 @playlist_bp.route('/create_playlist', methods=['POST'])

@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from model import Playlist, PlaylistManager, RefreshInfo
+from model import Playlist, PlaylistManager, RefreshInfo, Event
 from refresh_task import RefreshTask, PLAYLIST_REFRESH_TYPE, MANUAL_REFRESH_TYPE
 
 GLOBAL_INTERVAL = 3600
@@ -156,3 +156,86 @@ class TestDetermineNextPlugin:
         manager = PlaylistManager([Playlist("Night", "22:00", "23:00", [
             {"plugin_id": "clock", "name": "Clock", "plugin_settings": {}, "refresh": {"interval": 60}}])])
         assert make_task()._determine_next_plugin(manager, RefreshInfo(None, None, None, None), NOW) == (None, None)
+
+    def test_playlist_switch_replaces_current_item_immediately(self):
+        # the item on screen belongs to a playlist that is no longer active (window changed)
+        manager = make_manager()
+        manager.playlists.append(Playlist("Morning", "09:00", "11:00", [
+            {"plugin_id": "news", "name": "News", "plugin_settings": {}, "refresh": {"interval": 60}}]))
+        info = playlist_info("Clock", "clock", 60)   # Clock (Default) shown 1 min ago, 55-min slot
+        target, plugin = make_task()._determine_next_plugin(manager, info, NOW)
+        assert target.name == "Morning" and plugin.name == "News"
+
+
+EVENT_PLUGIN = {"plugin_id": "party", "name": "Party", "plugin_settings": {}, "refresh": {"interval": 3600}}
+
+
+def manager_with_event(start="10:00", end="10:05", date="2026-09-26", days=None, plugin=EVENT_PLUGIN):
+    manager = make_manager()
+    manager.add_event("Birthday", start, end, date=date, days=days)
+    if plugin:
+        manager.get_event("Birthday").add_plugin(plugin)
+    return manager
+
+
+class TestEvents:
+
+    def test_active_event_takes_over_from_playlist_item(self):
+        manager = manager_with_event()
+        target, plugin = make_task()._determine_next_plugin(manager, playlist_info("Clock", "clock", 60), NOW)
+        assert isinstance(target, Event) and target.name == "Birthday" and plugin.name == "Party"
+        assert manager.active_playlist == "Birthday"
+
+    def test_active_event_already_on_screen_does_nothing(self):
+        manager = manager_with_event()
+        info = RefreshInfo(PLAYLIST_REFRESH_TYPE, "party", NOW.isoformat(), "h", playlist="Birthday",
+                           plugin_instance="Party", slot_start_time=NOW.isoformat())
+        assert make_task()._determine_next_plugin(manager, info, NOW) == (None, None)
+
+    def test_event_end_hands_back_to_playlist(self):
+        manager = manager_with_event()
+        after = NOW + timedelta(minutes=5)
+        info = RefreshInfo(PLAYLIST_REFRESH_TYPE, "party", NOW.isoformat(), "h", playlist="Birthday",
+                           plugin_instance="Party", slot_start_time=NOW.isoformat())
+        target, plugin = make_task()._determine_next_plugin(manager, info, after)
+        assert isinstance(target, Playlist) and plugin.name == "Clock"
+
+    def test_event_on_other_date_is_ignored(self):
+        manager = manager_with_event(date="2026-09-27")
+        assert make_task()._determine_next_plugin(manager, playlist_info("Clock", "clock", 60), NOW) == (None, None)
+
+    def test_weekday_event(self):
+        saturday = NOW.weekday()   # 2026-09-26 is a Saturday
+        manager = manager_with_event(date=None, days=[saturday])
+        target, _ = make_task()._determine_next_plugin(manager, playlist_info("Clock", "clock", 60), NOW)
+        assert target.name == "Birthday"
+        manager = manager_with_event(date=None, days=[(saturday + 1) % 7])
+        assert make_task()._determine_next_plugin(manager, playlist_info("Clock", "clock", 60), NOW) == (None, None)
+
+    def test_empty_event_is_ignored(self):
+        manager = manager_with_event(plugin=None)
+        assert make_task()._determine_next_plugin(manager, playlist_info("Clock", "clock", 60), NOW) == (None, None)
+
+    def test_sleep_is_capped_by_next_event_start(self):
+        manager = manager_with_event(start="10:02", end="10:05")
+        # Clock slot has 54 min left, regen in 60 s, but the event starts in 2 min
+        manager.playlists[0].plugins[0].latest_refresh_time = NOW.isoformat()
+        manager.playlists[0].plugins[0].refresh = {"interval": 3600}
+        assert make_task()._compute_sleep_time(manager, playlist_info("Clock", "clock", 60), NOW) == 120
+
+    def test_sleep_is_capped_by_event_end_while_event_shows(self):
+        manager = manager_with_event(start="09:58", end="10:03")
+        info = RefreshInfo(PLAYLIST_REFRESH_TYPE, "party", NOW.isoformat(), "h", playlist="Birthday",
+                           plugin_instance="Party", slot_start_time=NOW.isoformat())
+        manager.get_event("Birthday").plugin.latest_refresh_time = NOW.isoformat()
+        assert make_task()._compute_sleep_time(manager, info, NOW) == 180
+
+    def test_regeneration_finds_event_owner(self):
+        manager = manager_with_event()
+        event_plugin = manager.get_event("Birthday").plugin
+        event_plugin.refresh = {"interval": 60}
+        event_plugin.latest_refresh_time = (NOW - timedelta(seconds=90)).isoformat()
+        info = RefreshInfo(PLAYLIST_REFRESH_TYPE, "party", NOW.isoformat(), "h", playlist="Birthday",
+                           plugin_instance="Party", slot_start_time=NOW.isoformat())
+        owner, instance = make_task()._determine_regeneration(manager, info, NOW)
+        assert owner.name == "Birthday" and instance.name == "Party"

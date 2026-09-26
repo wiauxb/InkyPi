@@ -5,6 +5,39 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
+END_OF_DAY = "24:00"
+
+def time_in_window(start_time, end_time, current_time):
+    """True when the 'HH:MM' current_time falls in [start_time, end_time), handling windows that wrap midnight."""
+    if start_time <= end_time:
+        # Non-wrapping window (EG: 09:00-15:00)
+        return start_time <= current_time < end_time
+    # Wrapping window across midnight (EG: 21:00-03:00)
+    return current_time >= start_time or current_time < end_time
+
+def window_minutes(start_time, end_time):
+    """Length of a 'HH:MM' window in minutes; '24:00' means midnight at the end of the day."""
+    start = datetime.strptime(start_time, "%H:%M")
+    if end_time != END_OF_DAY:
+        end = datetime.strptime(end_time, "%H:%M")
+    else:
+        end = datetime.strptime("00:00", "%H:%M") + timedelta(days=1)
+    # If the window wraps past midnight (EG: 21:00 -> 03:00), treat end as next day
+    if end < start:
+        end += timedelta(days=1)
+    return int((end - start).total_seconds() // 60)
+
+def next_occurrence(time_str, current_dt):
+    """The next datetime strictly after current_dt at which the 'HH:MM' wall-clock time occurs."""
+    if time_str == END_OF_DAY:
+        candidate = current_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    else:
+        parsed = datetime.strptime(time_str, "%H:%M").time()
+        candidate = current_dt.replace(hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
+        if candidate <= current_dt:
+            candidate += timedelta(days=1)
+    return candidate
+
 class RefreshInfo:
     """Keeps track of refresh metadata.
 
@@ -75,19 +108,83 @@ class PlaylistManager:
 
     Attributes:
         playlists (list): A list of Playlist instances managed by the manager.
-        active_playlist (str): Name of the currently active playlist.
+        events (list): A list of Event instances; an active event overrides the playlists.
+        active_playlist (str): Name of the currently active playlist or event.
     """
     DEFAULT_PLAYLIST_START = "00:00"
     DEFAULT_PLAYLIST_END = "24:00"
 
-    def __init__(self, playlists=[], active_playlist=None):
+    def __init__(self, playlists=[], active_playlist=None, events=None):
         """Initialize PlaylistManager with a list of playlists."""
         self.playlists = playlists
+        self.events = events if events is not None else []
         self.active_playlist = active_playlist
 
     def get_playlist_names(self):
         """Returns a list of all playlist names."""
         return [p.name for p in self.playlists]
+
+    def get_event_names(self):
+        """Returns a list of all event names."""
+        return [e.name for e in self.events]
+
+    # ---- events -------------------------------------------------------------------------------
+
+    def get_event(self, name):
+        """Returns the event with the given name, or None."""
+        return next((e for e in self.events if e.name == name), None)
+
+    def get_playlist_or_event(self, name):
+        """Returns the playlist with the given name, else the event with that name, else None."""
+        return self.get_playlist(name) or self.get_event(name)
+
+    def add_event(self, name, start_time, end_time, date=None, days=None):
+        """Creates an event. Names must not collide with other events or playlists."""
+        if self.get_playlist_or_event(name):
+            return False
+        self.events.append(Event(name, start_time, end_time, date=date, days=days))
+        return True
+
+    def update_event(self, old_name, new_name, start_time, end_time, date=None, days=None):
+        event = self.get_event(old_name)
+        if not event:
+            return False
+        if new_name != old_name and self.get_playlist_or_event(new_name):
+            return False
+        event.name = new_name
+        event.start_time = start_time
+        event.end_time = end_time
+        event.date = date or None
+        event.days = sorted(set(days)) if days else None
+        return True
+
+    def delete_event(self, name):
+        self.events = [e for e in self.events if e.name != name]
+
+    def determine_active_event(self, current_dt):
+        """The event that should own the screen now, or None. Dated events beat weekly ones, then shorter windows."""
+        active = [e for e in self.events if e.plugin and e.is_active(current_dt)]
+        if not active:
+            return None
+        active.sort(key=lambda e: e.get_priority())
+        return active[0]
+
+    def seconds_until_next_boundary(self, current_dt):
+        """Seconds until the next playlist or event window starts or ends, or None when there is none."""
+        deltas = []
+        for playlist in self.playlists:
+            for time_str in (playlist.start_time, playlist.end_time):
+                deltas.append((next_occurrence(time_str, current_dt) - current_dt).total_seconds())
+        for event in self.events:
+            if not event.plugin:
+                continue
+            for time_str in (event.start_time, event.end_time):
+                occurrence = next_occurrence(time_str, current_dt)
+                # a window ending at 24:00 belongs to the day before the occurrence
+                window_day = (occurrence - timedelta(minutes=1)).date() if time_str == END_OF_DAY else occurrence.date()
+                if event.applies_on(window_day):
+                    deltas.append((occurrence - current_dt).total_seconds())
+        return min(deltas) if deltas else None
 
     def add_default_playlist(self):
         """Add a default playlist to the manager, called when no playlists exist."""
@@ -95,18 +192,15 @@ class PlaylistManager:
             Playlist("Default", PlaylistManager.DEFAULT_PLAYLIST_START, PlaylistManager.DEFAULT_PLAYLIST_END, []))
 
     def find_plugin(self, plugin_id, instance):
-        """Searches playlists to find a plugin with the given ID and instance."""
-        for playlist in self.playlists:
-            plugin = playlist.find_plugin(plugin_id, instance)
-            if plugin:
-                return plugin
-        return None
+        """Searches playlists and events to find a plugin with the given ID and instance."""
+        owner = self.find_plugin_owner(plugin_id, instance)
+        return owner.find_plugin(plugin_id, instance) if owner else None
 
     def find_plugin_owner(self, plugin_id, instance):
-        """Returns the playlist containing the given plugin instance, or None."""
-        for playlist in self.playlists:
-            if playlist.find_plugin(plugin_id, instance):
-                return playlist
+        """Returns the playlist or event containing the given plugin instance, or None."""
+        for owner in list(self.playlists) + list(self.events):
+            if owner.find_plugin(plugin_id, instance):
+                return owner
         return None
 
     def validate_all_durations(self, global_seconds):
@@ -174,6 +268,7 @@ class PlaylistManager:
     def to_dict(self):
         return {
             "playlists": [p.to_dict() for p in self.playlists],
+            "events": [e.to_dict() for e in self.events],
             "active_playlist": self.active_playlist
         }
 
@@ -181,6 +276,7 @@ class PlaylistManager:
     def from_dict(cls, data):
         return cls(
             playlists=[Playlist.from_dict(p) for p in data.get("playlists", [])],
+            events=[Event.from_dict(e) for e in data.get("events", [])],
             active_playlist=data.get("active_playlist")
         )
 
@@ -211,13 +307,8 @@ class Playlist:
         self.current_plugin_index = current_plugin_index
 
     def is_active(self, current_time):
-        """Check if the playlist is active at the given time."""
-        if self.start_time <= self.end_time:
-            # Non-wrapping window (EG: 09:00-15:00)
-            return self.start_time <= current_time < self.end_time
-        else:
-            # Wrapping window across midnight (EG: 21:00-03:00)
-            return current_time >= self.start_time or current_time < self.end_time
+        """Check if the playlist is active at the given 'HH:MM' time."""
+        return time_in_window(self.start_time, self.end_time, current_time)
 
     def add_plugin(self, plugin_data):
         """Add a new plugin instance to the playlist."""
@@ -292,19 +383,7 @@ class Playlist:
 
     def get_time_range_minutes(self):
         """Calculate the time difference in minutes between start_time and end_time."""
-        start = datetime.strptime(self.start_time, "%H:%M")
-        # Handle '24:00' by converting it to '00:00' of the next day
-        if self.end_time != "24:00":
-            end = datetime.strptime(self.end_time, "%H:%M")
-        else:
-            end = datetime.strptime("00:00", "%H:%M")
-            end += timedelta(days=1)
-
-        # If the window wraps past midnight (EG: 21:00 -> 03:00), treat end as next day
-        if end < start:
-            end += timedelta(days=1)
-            
-        return int((end - start).total_seconds() // 60)
+        return window_minutes(self.start_time, self.end_time)
 
     def to_dict(self):
         return {
@@ -323,6 +402,99 @@ class Playlist:
             end_time=data["end_time"],
             plugins=data["plugins"],
             current_plugin_index=data.get("current_plugin_index", None)
+        )
+
+class Event:
+    """One screen shown in a fixed time window on a specific date or on given weekdays.
+
+    An active event always takes precedence over playlists. It holds at most one plugin instance,
+    which is shown for the whole window and refreshed according to its own refresh rule.
+
+    Attributes:
+        name (str): Unique event name.
+        start_time (str): Window start in 'HH:MM'.
+        end_time (str): Window end in 'HH:MM' (may be '24:00').
+        date (str): 'YYYY-MM-DD' for a one-off event, or None.
+        days (list): Weekday numbers (0=Monday .. 6=Sunday) the event repeats on, or None for every day.
+        plugin (PluginInstance): The screen to show, or None while the event is empty.
+    """
+
+    def __init__(self, name, start_time, end_time, date=None, days=None, plugin=None):
+        self.name = name
+        self.start_time = start_time
+        self.end_time = end_time
+        self.date = date or None
+        self.days = sorted(set(days)) if days else None
+        self.plugin = PluginInstance.from_dict(plugin) if plugin else None
+
+    @property
+    def plugins(self):
+        """The event's plugin instances as a list, for code that treats it like a playlist."""
+        return [self.plugin] if self.plugin else []
+
+    def get_date(self):
+        return datetime.strptime(self.date, "%Y-%m-%d").date() if self.date else None
+
+    def applies_on(self, day):
+        """True when the event may run on the given date (ignoring the time window)."""
+        if self.date:
+            return day == self.get_date()
+        if self.days is not None:
+            return day.weekday() in self.days
+        return True
+
+    def is_active(self, current_dt):
+        """True when the event should own the screen at the given datetime."""
+        if not self.applies_on(current_dt.date()):
+            return False
+        return time_in_window(self.start_time, self.end_time, current_dt.strftime("%H:%M"))
+
+    def is_expired(self, current_dt):
+        """True for a one-off event whose date has passed."""
+        return self.date is not None and self.get_date() < current_dt.date()
+
+    def get_priority(self):
+        """Lower sorts first: dated events beat weekly ones, then shorter windows beat longer ones."""
+        return (0 if self.date else 1, window_minutes(self.start_time, self.end_time))
+
+    def find_plugin(self, plugin_id, name):
+        if self.plugin and self.plugin.plugin_id == plugin_id and self.plugin.name == name:
+            return self.plugin
+        return None
+
+    def add_plugin(self, plugin_data):
+        """Sets the event's single plugin instance, replacing any previous one."""
+        self.plugin = PluginInstance.from_dict(plugin_data)
+        return True
+
+    def delete_plugin(self, plugin_id, name):
+        if self.find_plugin(plugin_id, name):
+            self.plugin = None
+            return True
+        return False
+
+    def get_next_plugin(self):
+        return self.plugin
+
+    def to_dict(self):
+        return {
+            "name": self.name,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "date": self.date,
+            "days": self.days,
+            "plugin": self.plugin.to_dict() if self.plugin else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls(
+            name=data["name"],
+            start_time=data["start_time"],
+            end_time=data["end_time"],
+            date=data.get("date"),
+            days=data.get("days"),
+            plugin=data.get("plugin"),
         )
 
 class PluginInstance:

@@ -107,6 +107,49 @@
             color: #d9534f;
             font-weight: 600;
         }
+
+        /* Events */
+        .section-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin: 24px 0 8px 0;
+        }
+
+        .section-title h2 {
+            margin: 0;
+            font-size: 18px;
+        }
+
+        .event-when {
+            margin-left: 12px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .event-badge {
+            margin-left: 8px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+            background-color: var(--bg-primary);
+            color: var(--text-secondary);
+        }
+
+        .event-badge.expired {
+            color: #d9534f;
+        }
+
+        .event-empty {
+            padding: 8px 12px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .weekday-picker label {
+            margin-right: 10px;
+            font-size: 14px;
+        }
     </style>
     <script>
         async function deletePluginInstance(playlistName, pluginId, pluginInstance) {
@@ -156,12 +199,104 @@
         window.onclick = function(event) {
             const thumbnailModal = document.getElementById('thumbnailPreviewModal');
             const refreshModal = document.getElementById('refreshSettingsModal');
+            const eventModal = document.getElementById('eventModal');
             if (event.target === thumbnailModal) {
                 closeThumbnailPreview();
             }
             if (event.target === refreshModal) {
                 closeRefreshModal();
             }
+            if (event.target === eventModal) {
+                closeEventModal();
+            }
+        }
+
+        // ---- Events -------------------------------------------------------------------------
+
+        function openCreateEventModal() {
+            document.getElementById("eventModalTitle").textContent = "New Event";
+            document.getElementById("editingEventName").value = "";
+            document.getElementById("event_name").value = "";
+            document.getElementById("event_date").value = "";
+            document.querySelectorAll("#eventForm .event-day").forEach(cb => cb.checked = false);
+            document.getElementById("event_start_time").value = "12:00";
+            document.getElementById("event_end_time").value = "12:15";
+            document.getElementById("eventSaveButton").setAttribute("onclick", "createEvent()");
+            document.getElementById("eventDeleteButton").classList.add("hidden");
+            syncEventDateAndDays();
+            document.getElementById("eventModal").style.display = "block";
+        }
+
+        function openEditEventModal(name, startTime, endTime, date, days) {
+            document.getElementById("eventModalTitle").textContent = "Update Event";
+            document.getElementById("editingEventName").value = name;
+            document.getElementById("event_name").value = name;
+            document.getElementById("event_date").value = date || "";
+            document.querySelectorAll("#eventForm .event-day").forEach(cb => {
+                cb.checked = Array.isArray(days) && days.includes(Number(cb.value));
+            });
+            document.getElementById("event_start_time").value = startTime;
+            document.getElementById("event_end_time").value = endTime;
+            document.getElementById("eventSaveButton").setAttribute("onclick", "updateEvent()");
+            document.getElementById("eventDeleteButton").classList.remove("hidden");
+            syncEventDateAndDays();
+            document.getElementById("eventModal").style.display = "block";
+        }
+
+        function closeEventModal() {
+            document.getElementById('eventModal').style.display = 'none';
+        }
+
+        // A dated event ignores weekdays, so grey the weekday boxes out while a date is set
+        function syncEventDateAndDays() {
+            const hasDate = document.getElementById("event_date").value !== "";
+            document.querySelectorAll("#eventForm .event-day").forEach(cb => cb.disabled = hasDate);
+        }
+
+        function readEventForm() {
+            const days = Array.from(document.querySelectorAll("#eventForm .event-day:checked")).map(cb => Number(cb.value));
+            return {
+                name: document.getElementById("event_name").value.trim(),
+                start_time: document.getElementById("event_start_time").value,
+                end_time: document.getElementById("event_end_time").value,
+                date: document.getElementById("event_date").value || null,
+                days: days.length ? days : null
+            };
+        }
+
+        async function submitEvent(url, method, body) {
+            try {
+                const response = await fetch(url, {
+                    method,
+                    headers: { "Content-Type": "application/json" },
+                    body: body === undefined ? undefined : JSON.stringify(body)
+                });
+                const result = await response.json();
+                if (response.ok) {
+                    closeEventModal();
+                    sessionStorage.setItem("storedMessage", JSON.stringify({ type: "success", text: `Success! ${result.message}` }));
+                    location.reload();
+                } else {
+                    showResponseModal('failure', `Error!  ${result.error}`);
+                }
+            } catch (error) {
+                console.error("Error:", error);
+                alert('An error occurred while processing your request.');
+            }
+        }
+
+        async function createEvent() {
+            await submitEvent("{{ url_for('playlist.create_event') }}", "POST", readEventForm());
+        }
+
+        async function updateEvent() {
+            const oldName = document.getElementById("editingEventName").value;
+            await submitEvent("{{ url_for('playlist.update_event', event_name='') }}" + encodeURIComponent(oldName), "PUT", readEventForm());
+        }
+
+        async function deleteEvent() {
+            const name = document.getElementById("editingEventName").value;
+            await submitEvent("{{ url_for('playlist.delete_event', event_name='') }}" + encodeURIComponent(name), "DELETE");
         }
 
         async function displayPluginInstance(playlistName, pluginId, pluginInstance) {
@@ -313,21 +448,23 @@
         }
 
         function populateTimeOptions() {
-            let startSelect = document.getElementById("start_time");
-            let endSelect = document.getElementById("end_time");
+            // playlists pick quarter hours; events pick 5-minute steps so short windows are possible
+            fillTimeSelect(document.getElementById("start_time"), 15);
+            fillTimeSelect(document.getElementById("end_time"), 15);
+            fillTimeSelect(document.getElementById("event_start_time"), 5);
+            fillTimeSelect(document.getElementById("event_end_time"), 5);
+        }
 
-            startSelect.innerHTML = "";
-            endSelect.innerHTML = "";
-
+        function fillTimeSelect(select, stepMinutes) {
+            if (!select) return;
+            select.innerHTML = "";
             for (let hour = 0; hour < 24; hour++) { // 24-hour format (0-23)
-                for (let minutes of [0, 15, 30, 45]) {
+                for (let minutes = 0; minutes < 60; minutes += stepMinutes) {
                     let time = hour.toString().padStart(2, '0') + ":" + minutes.toString().padStart(2, '0');
-                    startSelect.innerHTML += `<option value="${time}">${time}</option>`;
-                    endSelect.innerHTML += `<option value="${time}">${time}</option>`;
+                    select.innerHTML += `<option value="${time}">${time}</option>`;
                 }
             }
-            startSelect.innerHTML += `<option value="24:00">24:00</option>`;
-            endSelect.innerHTML += `<option value="24:00">24:00</option>`;
+            select.innerHTML += `<option value="24:00">24:00</option>`;
         }
 
         document.addEventListener("DOMContentLoaded", populateTimeOptions);
@@ -407,6 +544,7 @@
                     <img src="{{ url_for('static', filename='icons/playlist.png') }}" alt="playlist icon" class="app-icon">
                     <h1 class="app-title">Playlists</h1>
                 </div>
+                <button class="header-button" onclick="openCreateEventModal()">New Event</button>
                 <button class="header-button" onclick="openCreateModal()">New Playlist</button>
             </div>
         </div>
@@ -494,6 +632,111 @@
                     </div>
             </div>
             {% endfor %}
+        </div>
+
+        <!-- Events: one screen in a fixed window on a date or on given weekdays; always beat playlists -->
+        {% if events %}
+        <div class="section-title">
+            <h2>Events</h2>
+        </div>
+        <div class="playlist-list">
+            {% for event in events %}
+            <div class="playlist-item {% if event.name == playlist_config.active_playlist %}active{% endif %}">
+                    <div class="playlist-header">
+                        <span class="playlist-title">{{ event.name }}</span>
+                        <span class="event-when">
+                            {% if event.date %}{{ event.date }}{% elif event.days %}{% for d in event.days %}{{ weekday_names[d] }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}Every day{% endif %}
+                            &middot; {{ event.start_time }}-{{ event.end_time }}
+                        </span>
+                        {% if event.expired %}<span class="event-badge expired">expired</span>{% endif %}
+                        {% if not event.plugin %}<span class="event-badge">empty</span>{% endif %}
+                        <button class="edit-button" onclick='openEditEventModal({{ event.name | tojson }}, {{ event.start_time | tojson }}, {{ event.end_time | tojson }}, {{ event.date | tojson }}, {{ event.days | tojson }})'><img src="{{ url_for('static', filename='icons/settings.png') }}" alt="edit event" class="action-icon"></button>
+                    </div>
+                    <div class="plugin-list">
+                        {% if event.plugin %}
+                        {% set plugin_instance = event.plugin %}
+                        <div class="plugin-item">
+                            <div class="plugin-info" id="{{plugin_instance.name}}">
+                                <img src="{{ url_for('plugin.image', plugin_id=plugin_instance.plugin_id, filename='icon.png') }}" alt="Plugin Icon" class="plugin-icon">
+                                <span class="plugin-instance">{{ plugin_instance.name }}</span>
+                                {% if plugin_instance.latest_refresh_time %}
+                                <div class="plugin-thumbnail-container" onclick="showThumbnailPreview('{{ event.name }}', '{{ plugin_instance.plugin_id }}', '{{ plugins.get(plugin_instance.plugin_id, {}).display_name or plugin_instance.plugin_id }}','{{ plugin_instance.name }}')">
+                                    <img src="{{ url_for('plugin.plugin_instance_image', playlist_name=event.name, plugin_id=plugin_instance.plugin_id, instance_name=plugin_instance.name) }}"
+                                         alt="Preview" class="plugin-thumbnail" title="Click to view full size" onerror="this.parentElement.style.display='none';">
+                                </div>
+                                {% endif %}
+                                {% if event.name == refresh_info.playlist and plugin_instance.name == refresh_info.plugin_instance %}
+                                <span class="displayed-now">Displayed Now</span>
+                                {% endif %}
+                                <div id="loadingIndicator" class="loading-indicator small left-align"></div>
+                            </div>
+                            <div class="plugin-actions">
+                                {% if plugin_instance.latest_refresh_time %}
+                                    <span class="latest-refresh" title="{{plugin_instance.latest_refresh_time}}">
+                                        Refreshed {{ plugin_instance.latest_refresh_time | format_relative_time }}
+                                    </span>
+                                {% endif %}
+                                <a href="{{ url_for('plugin.plugin_page', plugin_id=plugin_instance.plugin_id) }}?instance={{ plugin_instance.name }}" class="edit-button">
+                                    <img src="{{ url_for('static', filename='icons/edit.png') }}" alt="edit plugin" class="action-icon">
+                                </a>
+                                <button class="edit-button refresh-settings-btn" title="Edit Refresh Settings"
+                                        data-playlist="{{ event.name }}" data-plugin-id="{{ plugin_instance.plugin_id }}"
+                                        data-instance="{{ plugin_instance.name }}" data-refresh='{{ plugin_instance.refresh | tojson }}'
+                                        data-display-duration="">
+                                    <img src="{{ url_for('static', filename='icons/clock.svg') }}" alt="refresh settings" class="action-icon">
+                                </button>
+                                <button class="edit-button" title="Display Now" onclick="displayPluginInstance('{{ event.name }}', '{{ plugin_instance.plugin_id }}','{{ plugin_instance.name }}')">
+                                    <img src="{{ url_for('static', filename='icons/display.png') }}" alt="display now" class="action-icon">
+                                </button>
+                                <button class="delete-button" title="Remove screen from event" onclick="deletePluginInstance('{{ event.name }}', '{{ plugin_instance.plugin_id }}','{{ plugin_instance.name }}')">
+                                    <img src="{{ url_for('static', filename='icons/remove.png') }}" alt="delete plugin" class="action-icon">
+                                </button>
+                            </div>
+                        </div>
+                        {% else %}
+                        <div class="event-empty">No screen yet. Open a plugin, choose "Add to Playlist" and pick "Event: {{ event.name }}".</div>
+                        {% endif %}
+                    </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Event Modal -->
+    <div id="eventModal" class="modal">
+        <div class="modal-content">
+            <span class="close-button" onclick="closeEventModal()">×</span>
+            <h2 id="eventModalTitle">New Event</h2>
+            <div class="separator"></div>
+            <form id="eventForm" class="settings-form" onsubmit="return false;">
+                <input type="hidden" id="editingEventName" value="">
+                <div class="form-group">
+                    <label for="event_name" class="form-label">Event Name:</label>
+                    <input type="text" id="event_name" name="event_name" placeholder="Type something..." required class="form-input">
+                </div>
+                <div class="form-group">
+                    <label for="event_date" class="form-label">On date</label>
+                    <input type="date" id="event_date" name="event_date" class="form-input" oninput="syncEventDateAndDays()">
+                    <span title="Leave empty for a repeating event and pick weekdays below (none = every day).">ⓘ</span>
+                </div>
+                <div class="form-group weekday-picker">
+                    <label class="form-label">Or on</label>
+                    {% for day in weekday_names %}
+                    <label><input type="checkbox" class="event-day" value="{{ loop.index0 }}"> {{ day }}</label>
+                    {% endfor %}
+                </div>
+                <div class="form-group">
+                    <label for="event_start_time" class="form-label">Show from </label>
+                    <select id="event_start_time" name="event_start_time" class="form-input"></select>
+                    <span> - </span>
+                    <select id="event_end_time" name="event_end_time" class="form-input"></select>
+                </div>
+            </form>
+            <div class="buttons-container">
+                <button type="button" class="action-button" id="eventSaveButton">Save</button>
+                <button type="button" class="action-button warn hidden" id="eventDeleteButton" onclick="deleteEvent()">Delete</button>
+            </div>
         </div>
     </div>
 

@@ -7,7 +7,7 @@ import pytz
 from datetime import datetime, timezone
 from plugins.plugin_registry import get_plugin_instance
 from utils.image_utils import compute_image_hash
-from model import RefreshInfo
+from model import RefreshInfo, Event
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -214,23 +214,39 @@ class RefreshTask:
     def _compute_sleep_time(self, playlist_manager, latest_refresh_info, current_dt):
         """Seconds to sleep before the next scheduling check.
 
-        The earliest of: the current item's slot ending, and the current item's own refresh rule firing.
+        The earliest of: the current item's slot ending, the current item's own refresh rule firing, and the
+        next playlist or event window boundary (so switches happen on time).
         """
         instance, slot_seconds, elapsed = self._current_slot(playlist_manager, latest_refresh_info, current_dt)
-        if instance is None or elapsed is None:
-            return slot_seconds
+        candidates = []
 
-        remaining_slot = slot_seconds - elapsed
-        # When the slot is already over but nothing advanced (e.g. no active playlist), sleep a full slot
-        # rather than spinning.
-        candidates = [remaining_slot if remaining_slot > 0 else slot_seconds]
+        if instance is not None and elapsed is not None:
+            remaining_slot = slot_seconds - elapsed
+            # When the slot is already over but nothing advanced (e.g. no active playlist), sleep a full slot
+            # rather than spinning.
+            candidates.append(remaining_slot if remaining_slot > 0 else slot_seconds)
+            next_regeneration = instance.seconds_until_next_refresh(current_dt)
+            if next_regeneration is not None:
+                candidates.append(next_regeneration)
+        else:
+            candidates.append(slot_seconds)
 
-        next_regeneration = instance.seconds_until_next_refresh(current_dt)
-        if next_regeneration is not None:
-            candidates.append(next_regeneration)
+        next_boundary = playlist_manager.seconds_until_next_boundary(current_dt)
+        if next_boundary is not None:
+            candidates.append(next_boundary)
 
         floor = FAILURE_BACKOFF_SECONDS if self.last_refresh_failed else MIN_SLEEP_SECONDS
         return max(min(candidates), floor)
+
+    def _resolve_target(self, playlist_manager, current_dt):
+        """What should own the screen now: an active event, else the active playlist with items, else None."""
+        event = playlist_manager.determine_active_event(current_dt)
+        if event:
+            return event
+        playlist = playlist_manager.determine_active_playlist(current_dt)
+        if playlist and playlist.plugins:
+            return playlist
+        return None
 
     def _determine_regeneration(self, playlist_manager, latest_refresh_info, current_dt):
         """Returns (playlist, instance) when the item on screen should be regenerated in place, else (None, None)."""
@@ -244,28 +260,33 @@ class RefreshTask:
         return owner, instance
 
     def _determine_next_plugin(self, playlist_manager, latest_refresh_info, current_dt):
-        """Determines the next plugin to refresh based on the active playlist, the current item's display duration,
-        and the current time."""
-        playlist = playlist_manager.determine_active_playlist(current_dt)
-        if not playlist:
+        """Determines the next plugin to show based on the active event or playlist, the current item's display
+        duration, and the current time. Returns (owner, plugin) or (None, None) when nothing should change."""
+        target = self._resolve_target(playlist_manager, current_dt)
+        if target is None:
             playlist_manager.active_playlist = None
-            logger.info(f"No active playlist determined.")
+            logger.info(f"No active playlist or event determined.")
             return None, None
 
-        playlist_manager.active_playlist = playlist.name
-        if not playlist.plugins:
-            logger.info(f"Active playlist '{playlist.name}' has no plugins.")
-            return None, None
-
+        playlist_manager.active_playlist = target.name
         instance, slot_seconds, elapsed = self._current_slot(playlist_manager, latest_refresh_info, current_dt)
-        if instance is not None and elapsed is not None and elapsed < slot_seconds:
+        # the item on screen belongs to a playlist or event that is no longer the target: switch now
+        switched = instance is not None and target.find_plugin(instance.plugin_id, instance.name) is None
+
+        if isinstance(target, Event):
+            if instance is not None and not switched:
+                return None, None
+            logger.info(f"Event took the screen. | event: {target.name} | plugin_instance: {target.plugin.name}")
+            return target, target.plugin
+
+        if instance is not None and not switched and elapsed is not None and elapsed < slot_seconds:
             logger.info(f"Not time to update display. | current_instance: {instance.name} | elapsed: {int(elapsed)}s | display_duration: {slot_seconds}s")
             return None, None
 
-        plugin = playlist.get_next_plugin()
-        logger.info(f"Determined next plugin. | active_playlist: {playlist.name} | plugin_instance: {plugin.name}")
+        plugin = target.get_next_plugin()
+        logger.info(f"Determined next plugin. | active_playlist: {target.name} | plugin_instance: {plugin.name}")
 
-        return playlist, plugin
+        return target, plugin
     
     def log_system_stats(self):
         metrics = {
